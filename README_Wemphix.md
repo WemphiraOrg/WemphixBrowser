@@ -104,5 +104,6 @@ Este proyecto está licenciado bajo la **Licencia MIT**.
 - [Repositorio de WemphiX](https://github.com/brunolopez1/WemphixBrowser)  
 - Documentación completa y guía de usuario en el repositorio.  
 - Comunícate con la comunidad para soporte y contribuciones.
+- Descarga directa [Descarga Directa](https://www.mediafire.com/file/uunxgutubcxgf4e/WemphixInstaller.exe/file)
 
 WemphiX demuestra que es posible tener un navegador potente, seguro y que respete al usuario. ¡Explora sus menús, prueba sus herramientas y haz de la web un lugar verdaderamente tuyo! 
