@@ -1,0 +1,8 @@
+# Ignora las carpetas de construcción y caché de PyInstaller
+dist/
+__pycache__/
+
+# Ignora los archivos de log y de instalación
+*.log
+*.iss
+*.exe
