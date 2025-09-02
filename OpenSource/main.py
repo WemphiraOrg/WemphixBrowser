@@ -3292,22 +3292,20 @@ class Navegador(QMainWindow):
                         if not icon.isNull():
                             icon_cache_key = icon.cacheKey()
                             if icon_cache_key in self.dominant_color_cache:
-                                # Usar el color cacheado directamente
+                                
                                 dominant_color = self.dominant_color_cache[icon_cache_key]
                                 self._on_dominant_color_ready(dominant_color, widget, i)
                             else:
-                                # El cálculo del color dominante puede ser costoso. Lo movemos a un hilo secundario
-                                # para evitar congelar la interfaz de usuario, especialmente al cargar muchas pestañas.
+
                                 image = icon.pixmap(16, 16).toImage().convertToFormat(QImage.Format.Format_RGBA8888)
                                 worker = Worker(self._get_dominant_color_from_image, image)
-                                # Conectamos la señal de resultado a la ranura que aplicará el color.
-                                # Usamos una lambda para capturar el widget y el índice de la pestaña correctos.
+
                                 worker.signals.result.connect(
                                     lambda color, w=widget, tab_idx=i, key=icon_cache_key: self._on_dominant_color_ready(color, w, tab_idx, key_to_cache=key)
                                 )
                                 self.threadpool.start(worker)
                         else:
-                            # Si no hay icono, reseteamos al tema por defecto inmediatamente.
+                            
                             widget.setProperty("dominant_color", None)
                             if self.tabs.currentIndex() == i:
                                 self.apply_custom_theme("Default")
@@ -3508,8 +3506,7 @@ class Navegador(QMainWindow):
                 widget.setProperty("original_title", original_title)
                 widget.setProperty("tab_group", {"name": name, "color": color})
                 
-                # Llamar a actualizar_titulo_pestana requiere el webview, que no tenemos aquí.
-                # Actualizamos manualmente el texto de la pestaña y la lista vertical.
+
                 group_info = {"name": name, "color": color}
                 color_map = {"blue": "🔵", "red": "🔴", "green": "🟢", "yellow": "🟡", "purple": "🟣", "gray": "⚪"}
                 emoji = color_map.get(group_info["color"], "⚫")
@@ -3538,7 +3535,7 @@ class Navegador(QMainWindow):
     def _toggle_advanced_security(self, enabled):
         self.settings.setValue("advancedSecurityEnabled", enabled)
 
-        # Sincronizar la acción del menú si no fue la que originó la señal
+
         if hasattr(self, 'advanced_security_action') and self.advanced_security_action.isChecked() != enabled:
             self.advanced_security_action.setChecked(enabled)
 
@@ -3570,19 +3567,19 @@ class Navegador(QMainWindow):
     def _start_rgb_theme(self):
         if not self.rgb_theme_timer.isActive():
             self.rgb_hue = 0
-            self.rgb_theme_timer.start(500) # Aumentamos el intervalo para ahorrar más CPU
+            self.rgb_theme_timer.start(500) 
 
     def _stop_rgb_theme(self):
         if self.rgb_theme_timer.isActive():
             self.rgb_theme_timer.stop()
 
     def _update_rgb_theme(self):
-        self.rgb_hue = (self.rgb_hue + 6) % 360 # Aumentamos el paso para mantener la velocidad visual
+        self.rgb_hue = (self.rgb_hue + 6) % 360 
         color = QColor.fromHsv(self.rgb_hue, 200, 220)
         self._apply_theme_stylesheet("Custom", color.name())
 
     def apply_custom_theme(self, theme_name, custom_color_hex=None):
-        self._stop_rgb_theme() # Stop RGB timer by default when changing themes
+        self._stop_rgb_theme() 
 
         self.settings.setValue("custom_theme", theme_name)
         if theme_name == "Custom":
@@ -3590,7 +3587,7 @@ class Navegador(QMainWindow):
 
         if theme_name == "RGB Dinámico":
             self._start_rgb_theme()
-            return # The timer will handle applying the stylesheet
+            return 
 
         if theme_name == "Adaptativo":
             self.apply_custom_theme("Default")
@@ -3716,7 +3713,7 @@ class Navegador(QMainWindow):
         in_reader_mode = tab_widget.property("in_reader_mode") or False
 
         if in_reader_mode:
-            # Salir del modo lectura
+            
             if original_url := tab_widget.property("original_url"):
                 webview.setUrl(QUrl(original_url))
             tab_widget.setProperty("in_reader_mode", False)
@@ -3727,7 +3724,7 @@ class Navegador(QMainWindow):
 
             self.reader_mode_action.setChecked(False)
         else:
-            # Entrar en modo lectura
+            
             webview.page().toHtml(lambda html, wv=webview: self._activate_reader_mode(html, wv))
 
     def _activate_reader_mode(self, html: str, webview: QWebEngineView):
@@ -3736,7 +3733,7 @@ class Navegador(QMainWindow):
         try:
             doc = readability.Document(html)
             content = doc.summary()
-            if len(content) < 400: # Heurística para evitar activar en páginas no-artículos
+            if len(content) < 400: 
                 QMessageBox.information(self, "Modo Lectura", "Esta página no parece ser un artículo o no es compatible con el modo lectura.")
                 return
             title = doc.title()
@@ -3885,7 +3882,7 @@ class Navegador(QMainWindow):
         
         target_webview = None
         
-        # Intenta encontrar la pestaña sobre la que se soltó el archivo
+        
         tab_bar = self.tabs.tabBar()
         pos_in_tab_bar = tab_bar.mapFrom(self, event.position().toPoint())
 
@@ -3895,7 +3892,7 @@ class Navegador(QMainWindow):
                 if widget := self.tabs.widget(tab_index):
                     target_webview = widget.findChild(QWebEngineView)
         
-        # Si no se soltó sobre una pestaña específica, usa la actual
+        
         if not target_webview:
             target_webview = self._get_current_webview()
 
@@ -3909,11 +3906,11 @@ class Navegador(QMainWindow):
         for url in urls:
             if url.isLocalFile():
                 if not first_file_navigated:
-                    # El primer archivo navega en la pestaña objetivo
+                    
                     target_webview.setUrl(url)
                     first_file_navigated = True
                 else:
-                    # Los archivos siguientes se abren en nuevas pestañas
+                    
                     self.agregar_pestana(url.toString(), focus=False)
 class TaskManagerDialog(QDialog):
     def __init__(self, parent: "Navegador"):
@@ -3935,7 +3932,7 @@ class TaskManagerDialog(QDialog):
         self.process.cpu_percent(interval=None)
 
         self.timer = QTimer(self)
-        self.timer.setInterval(2000) # Update every 2 seconds
+        self.timer.setInterval(2000) 
         self.timer.timeout.connect(self.update_stats)
         self.timer.start()
 
@@ -4322,7 +4319,7 @@ class HistoryPageWidget(QWidget):
         self.proxy_model = QSortFilterProxyModel()
         self.proxy_model.setSourceModel(self.model)
         self.proxy_model.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.proxy_model.setFilterKeyColumn(-1) # Buscar en todas las columnas
+        self.proxy_model.setFilterKeyColumn(-1) 
         self.table_view.setModel(self.proxy_model)
 
         self.search_input.textChanged.connect(self.proxy_model.setFilterFixedString)
@@ -4375,14 +4372,14 @@ class HibernationWidget(QWidget):
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Fondo con la captura de pantalla desaturada
+        
         self.background_label = QLabel()
         desaturated_pixmap = self._desaturate(screenshot)
         self.background_label.setPixmap(desaturated_pixmap)
         self.background_label.setScaledContents(True)
         layout.addWidget(self.background_label, 0, 0)
 
-        # Contenedor para el texto y botón superpuesto
+        
         overlay_container = QWidget()
         overlay_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         overlay_layout = QVBoxLayout(overlay_container)
@@ -4459,7 +4456,7 @@ class CommandPaletteDialog(QDialog):
         self.main_window = parent
         self.setMinimumSize(600, 400)
         
-        # Posicionar el diálogo en la parte superior central
+       
         parent_rect = parent.geometry()
         self.setGeometry(
             parent_rect.x() + (parent_rect.width() - self.width()) // 2,
@@ -4515,7 +4512,7 @@ class CommandPaletteDialog(QDialog):
         if event.key() == Qt.Key.Key_Escape:
             self.reject()
         elif event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
-            # Dejar que QListWidget maneje la navegación
+            
             self.results_list.keyPressEvent(event)
         else:
             super().keyPressEvent(event)
@@ -4588,7 +4585,7 @@ class SecurityIndicatorWidget(QWidget):
         scheme = url.scheme()
 
         if scheme == "https":
-            # Usamos un carácter de candado. Se puede reemplazar por un QIcon si se tienen los assets.
+            
             self.icon_label.setText("🔒")
             self.text_label.setText("Seguro")
             self.setToolTip("La conexión es segura")
@@ -4596,9 +4593,9 @@ class SecurityIndicatorWidget(QWidget):
             self.icon_label.setText("⚠️")
             self.text_label.setText("No seguro")
             self.setToolTip("Tu conexión a este sitio no es segura.")
-        else: # about:, file:, wemphix:, etc.
+        else: 
             self.icon_label.setText("")
-            self.text_label.setText("") # No mostrar nada para páginas internas/locales
+            self.text_label.setText("") 
             self.setToolTip(f"Viendo página local: {url.toString()}")
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -4608,7 +4605,7 @@ class SecurityIndicatorWidget(QWidget):
             host = url.host()
 
             if scheme == "https":
-                # En un navegador real, aquí se mostraría información del certificado.
+                
                 QMessageBox.information(self, "Información del Sitio",
                                         f"<b>{host}</b>\n\nLa conexión es segura.\n\n"
                                         "Tu información (por ejemplo, contraseñas o números de tarjetas de crédito) es privada cuando se envía a este sitio.")
@@ -4919,7 +4916,7 @@ class PasswordManager:
         return self.data.get("logins", [])
 
     def save_password(self, url, username, password):
-        # Remove existing entry for the same url/username
+        
         self.data["logins"] = [
             login for login in self.data["logins"]
             if not (login["url"] == url and login["username"] == username)
@@ -4996,9 +4993,9 @@ class MasterPasswordDialog(QDialog):
     def _generate_suggested_password(self):
         alphabet = string.ascii_letters + string.digits + string.punctuation
         while True:
-            # Generar una contraseña de 20 caracteres para alta seguridad
+            
             password = ''.join(secrets.choice(alphabet) for i in range(20))
-            # Asegurar que contenga todos los tipos de caracteres
+            
             if (any(c.islower() for c in password)
                     and any(c.isupper() for c in password)
                     and any(c.isdigit() for c in password)
