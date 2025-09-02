@@ -1,34 +1,36 @@
 import os
-os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = "8888"
+os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = "8888" # type: ignore
 import secrets
 import readability 
 
 import sys
-import shutil
+import shutil # type: ignore
 import traceback
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QFormLayout, QComboBox, QLabel, QCompleter, QGroupBox,
-    QVBoxLayout, QLineEdit, QPushButton, QHBoxLayout, QProgressBar, QFileDialog, QDialog, QTextEdit, QDialogButtonBox,
-    QMessageBox, QMenu, QDockWidget, QListWidget, QListWidgetItem, QButtonGroup, QFrame, QCheckBox, QGridLayout,
-    QColorDialog, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QFileIconProvider, QStatusBar
+    QVBoxLayout, QLineEdit, QPushButton, QHBoxLayout, QProgressBar, QFileDialog, QDialog, QTextEdit, QDialogButtonBox, QStackedWidget,
+    QMessageBox, QMenu, QDockWidget, QListWidget, QListWidgetItem, QButtonGroup, QFrame, QCheckBox, QGridLayout, QTableView,
+    QColorDialog, QStyle, QTableWidget, QTableWidgetItem, QHeaderView, QFileIconProvider, QStatusBar,
+    QAbstractItemView
 )
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import (
-    QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineDownloadRequest,
+    QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineDownloadRequest, QWebEngineFullScreenRequest,
     QWebEngineUrlRequestInterceptor, QWebEngineScript
 )
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtCore import (
     QUrl, Qt, qVersion, QSettings, QObject, pyqtSlot, QVariant, pyqtSignal, QPoint,
-    QStringListModel, QTimer, QEvent, QFileInfo, QSize, QRunnable, QThreadPool,
-    QTranslator, QLocale, QLibraryInfo
+    QStringListModel, QTimer, QEvent, QFileInfo, QSize, QRunnable, QThreadPool, QAbstractTableModel, QSortFilterProxyModel, QModelIndex,
+    QTranslator, QLocale, QLibraryInfo, QSignalBlocker
 )
-from PyQt6.QtGui import QIcon, QDesktopServices, QActionGroup, QShortcut, QKeySequence, QPixmap, QPalette, QColor, QAction, QImage, QPainter
+from PyQt6.QtGui import QIcon, QDesktopServices, QActionGroup, QShortcut, QKeySequence, QPixmap, QPalette, QColor, QAction, QImage, QPainter, QDragEnterEvent, QDropEvent, QMouseEvent
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet, InvalidToken
 
+import itertools
 import json
 import urllib.request
 import base64
@@ -39,6 +41,8 @@ import zipfile
 import string
 import time
 import tempfile
+import psutil # type: ignore
+from datetime import timedelta
 
 def get_base_path():
     """
@@ -123,6 +127,27 @@ class Worker(QRunnable):
         finally:
             self.signals.finished.emit()
 
+class UrlBar(QLineEdit):
+    """
+    Una barra de URL personalizada que cambia la alineación del texto
+    según si está enfocada o no, para mejorar la visibilidad de la URL.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Inicia con el texto alineado a la derecha para ver siempre el dominio.
+        self.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+    def focusInEvent(self, event):
+        # Al hacer clic, alinear a la izquierda y seleccionar todo para una edición fácil.
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        QTimer.singleShot(0, self.selectAll)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        # Al perder el foco, volver a alinear a la derecha.
+        self.setAlignment(Qt.AlignmentFlag.AlignRight)
+        super().focusOutEvent(event)
+
 class AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
     """Intercepta peticiones de red para bloquear anuncios y rastreadores."""
     def __init__(self, parent=None):
@@ -199,6 +224,14 @@ class CustomWebEnginePage(QWebEnginePage):
                 return False
 
         if isMainFrame:
+            main_window = self.parent().window() if self.parent() and hasattr(self.parent(), 'window') else None
+            if main_window and hasattr(main_window, 'malware_blocker_list') and main_window.malware_blocker_list:
+                host = url.host()
+                if host in main_window.malware_blocker_list:
+                    self._is_showing_internal_page = True
+                    self._show_malware_warning_page(url)
+                    return False
+
             if url.scheme() == 'http':
                 if url.host() not in ["localhost", "127.0.0.1"]:
                     self._is_showing_internal_page = True
@@ -390,6 +423,55 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.setHtml(html, QUrl("wemphix:security-warning"))
 
+    def _show_malware_warning_page(self, target_url: QUrl):
+        """Muestra una advertencia de página completa para sitios peligrosos."""
+        image_path = get_asset_path("Danger.png") # Asume que existe un icono de peligro
+
+        try:
+            with open(image_path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            image_data_uri = f"data:image/png;base64,{encoded_string}"
+        except Exception:
+            image_data_uri = ""
+
+        bg_color = "#3c2e2e"
+        text_color = "#f28b82"
+        secondary_text_color = "#dcdcdc"
+        button_bg_color = "#5a5a5a"
+        button_text_color = "#ffffff"
+
+        html = f"""
+        <!DOCTYPE html>
+        <html><head><title>Sitio Engañoso</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: {bg_color}; color: {text_color}; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+            .container {{ display: flex; align-items: center; text-align: left; max-width: 650px; padding: 20px; }}
+            .image-container {{ margin-right: 40px; flex-shrink: 0; }}
+            img {{ width: 80px; height: 80px; }}
+            h1 {{ font-size: 24px; font-weight: 500; margin-top: 0; margin-bottom: 16px; }}
+            p {{ font-size: 15px; color: {secondary_text_color}; line-height: 1.5; margin-bottom: 24px;}}
+            .buttons a {{ text-decoration: none; padding: 10px 20px; border-radius: 5px; font-weight: 500; margin-right: 10px; display: inline-block; border: 1px solid transparent;}}
+            .back-button {{ background-color: {button_bg_color}; color: {button_text_color}; border: 1px solid #9a9a9a; }}
+            .proceed-button {{ background-color: transparent; color: {text_color}; border: 1px solid {text_color}; }}
+        </style>
+        </head><body>
+            <div class="container">
+                <div class="image-container">
+                    <img src="{image_data_uri}" alt="Peligro">
+                </div>
+                <div>
+                    <h1>Sitio Engañoso Detectado</h1>
+                    <p>Wemphix ha bloqueado el acceso a <b>{target_url.host()}</b>.<br>Este sitio puede intentar engañarte para que instales software dañino o reveles tu información personal (por ejemplo, contraseñas o tarjetas de crédito).</p>
+                    <div class="buttons">
+                        <a href="javascript:history.back()" class="back-button">Volver a un lugar seguro</a>
+                        <a href="{target_url.toString()}" class="proceed-button">Ignorar y continuar</a>
+                    </div>
+                </div>
+            </div>
+        </body></html>
+        """
+        self.setHtml(html, QUrl("wemphix:malware-warning"))
+
 class BrowserApi(QObject):
     """
     Objeto que se expone al entorno JavaScript de las páginas web.
@@ -539,6 +621,23 @@ class SettingsDialog(QDialog):
     def _on_block_list_changed(self):
         text = self.block_list_edit.toPlainText()
         self.main_window._update_user_block_list(text)
+
+class AdvancedSecuritySettings(QGroupBox):
+    def __init__(self, main_window: "Navegador", parent=None):
+        super().__init__("Seguridad Avanzada", parent)
+        self.main_window = main_window
+        layout = QVBoxLayout(self)
+
+        self.advanced_security_check = QCheckBox("Activar endurecimiento de seguridad (Inyectar CSP)")
+        self.advanced_security_check.setToolTip(
+            "Añade cabeceras de seguridad como Content-Security-Policy para mitigar ataques XSS.\n"
+            "Es una función experimental y puede afectar la funcionalidad de algunos sitios.\n"
+            "¡ADVERTENCIA! Esto es experimental y puede romper la funcionalidad de muchos sitios web."
+        )
+        self.advanced_security_check.setChecked(self.main_window.settings.value("advancedSecurityEnabled", False, type=bool))
+        # La acción del menú y este checkbox llaman al mismo slot, que se encarga de sincronizarlos.
+        self.advanced_security_check.toggled.connect(self.main_window._toggle_advanced_security)
+        layout.addWidget(self.advanced_security_check)
 
 class AboutDialog(QDialog):
     def __init__(self, parent: "Navegador"):
@@ -788,13 +887,21 @@ class BookmarkManager:
 class Navegador(QMainWindow):
     def __init__(self, is_incognito=False, main_window=None):
         super().__init__()
+        self.setAcceptDrops(True)
         self.is_incognito = is_incognito
         self.main_window = main_window
         self.other_windows = []
         self.profile_path = ""
+        self.performance_mode = "normal"
         self.session_path = ""
         self.about_to_clear_profile = False
+        self.fullscreen_request = None
+        self.vertical_tabs_enabled = False
         self.battery_saver_enabled = False
+        self.hibernation_enabled = False
+        self.hibernation_timer = QTimer(self)
+        self.tab_last_active_time = {}
+        self.notes_loaded = False
         self.super_memory_saver_enabled = False
         
         self._screenshot_parts = []
@@ -812,7 +919,10 @@ class Navegador(QMainWindow):
         self.history_list_widget = None
         self.history_path = ""
         self.history = []
+        self.vertical_tabs_dock = None
+        self.vertical_tabs_list = None
         self.notes_dock = None
+        self.web_panels_dock = None
         self.notes_editor = None
         self.notes_path = ""
         self.extensions_path = ""
@@ -821,10 +931,13 @@ class Navegador(QMainWindow):
         self.extensions = {}
         self.browser_api = BrowserApi(self)
         self.ad_blocker = AdBlockInterceptor()
+        self.malware_blocker_list = set()
         self.qwebchannel_script_content = ""
         self.password_manager = None
         self.password_handler_script_content = ""
         self.last_app_state = Qt.ApplicationState.ApplicationActive
+        self.standard_icons = {}
+        self.dominant_color_cache = {}
         self.settings = QSettings("WemphixOrg", "Wemphix")
 
         self.rgb_theme_timer = QTimer(self)
@@ -836,21 +949,25 @@ class Navegador(QMainWindow):
         self.suggestion_timer.setInterval(250)
         self.suggestion_timer.timeout.connect(self._perform_url_suggestions)
 
-        self.threadpool = QThreadPool()
-        print(f"INFO: Thread pool started with {self.threadpool.maxThreadCount()} threads.")
+        self.threadpool = QThreadPool() 
+        self.performance_mode = self.settings.value("performanceMode", "normal")
+        self._update_performance_flags(self.performance_mode)
 
-        self.battery_saver_enabled = self.settings.value("batterySaverEnabled", False, type=bool)
-        self.super_memory_saver_enabled = self.settings.value("superMemorySaverEnabled", False, type=bool)
+        self.vertical_tabs_enabled = self.settings.value("verticalTabsEnabled", False, type=bool)
+        self.hibernation_enabled = self.settings.value("hibernationEnabled", False, type=bool)
+        self.hibernation_timer.setInterval(60 * 1000) # Check every minute
+        self.hibernation_timer.timeout.connect(self._check_tabs_for_hibernation)
+        if self.hibernation_enabled: self.hibernation_timer.start()
 
+        self._cache_standard_icons()
         self._setup_profile()
         self._load_qwebchannel_script()
         self._load_password_handler_script()
         self._setup_adblocker()
+        self._setup_malware_blocker()
         self.persistent_profile.setUrlRequestInterceptor(self.ad_blocker)
         self._load_user_block_list()
-        self._load_extensions()
         self._load_history()
-        self._load_notes()
         self._setup_ui()
         self._setup_password_manager()
         self._setup_shortcuts()
@@ -858,12 +975,28 @@ class Navegador(QMainWindow):
         custom_theme = self.settings.value("custom_theme", "Default")
         custom_color = self.settings.value("custom_theme_color", None)
         self.apply_custom_theme(custom_theme, custom_color)
+        self._load_extensions()
         self._create_menu()
         
         self.restoreGeometry(self.settings.value("geometry", self.saveGeometry()))
         self.restoreState(self.settings.value("windowState", self.saveState()))
 
         self._restore_session()
+
+    def _cache_standard_icons(self):
+        """Caches standard icons at startup to speed up new tab creation."""
+        style = self.style()
+        self.standard_icons = {
+            "back": style.standardIcon(QStyle.StandardPixmap.SP_ArrowBack),
+            "forward": style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward),
+            "reload": style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload),
+            "home": style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon),
+            "save": style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton),
+            "apply": style.standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton),
+            "downloads": style.standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
+            "settings": style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
+            "personalize": style.standardIcon(QStyle.StandardPixmap.SP_FileDialogListView),
+        }
 
     def _setup_profile(self):
         if self.is_incognito:
@@ -880,6 +1013,7 @@ class Navegador(QMainWindow):
             self.extensions_path = os.path.join(self.profile_path, "extensions")
             self.session_path = os.path.join(self.profile_path, "session.json")
             self.notes_path = os.path.join(self.profile_path, "notes.txt")
+            self.malware_block_list_path = os.path.join(self.profile_path, "malware_list.txt")
             self.passwords_path = os.path.join(self.profile_path, "passwords.json.enc")
             self.extensions_manifest_path = os.path.join(self.extensions_path, "extensions.json")
             os.makedirs(self.extensions_path, exist_ok=True)
@@ -925,6 +1059,17 @@ class Navegador(QMainWindow):
         self.adblock_list_path = os.path.join(self.profile_path, "adblock_list.txt")
         self.ad_blocker.load_ad_block_list(self.adblock_list_path)
 
+    def _setup_malware_blocker(self):
+        """Carga la lista de bloqueo de malware desde el archivo local al inicio."""
+        if self.is_incognito or not os.path.exists(self.malware_block_list_path):
+            return
+        try:
+            with open(self.malware_block_list_path, "r", encoding="utf-8") as f:
+                self.malware_blocker_list = {line.strip() for line in f if line.strip() and not line.startswith('#')}
+            print(f"Lista de bloqueo de malware cargada con {len(self.malware_blocker_list)} dominios.")
+        except IOError:
+            print("No se pudo cargar la lista de bloqueo de malware.")
+
     def _load_user_block_list(self):
         user_list_text = self.settings.value("user_block_list", "")
         self.ad_blocker.update_user_block_list(user_list_text)
@@ -943,6 +1088,7 @@ class Navegador(QMainWindow):
         self.tabs.customContextMenuRequested.connect(self._show_tab_context_menu)
         self.tabs.setUsesScrollButtons(True)
 
+        self.tabs.tabBar().setVisible(not self.vertical_tabs_enabled)
         corner_widget = QWidget()
         corner_layout = QHBoxLayout(corner_widget)
         corner_layout.setContentsMargins(2, 0, 2, 0)
@@ -957,6 +1103,41 @@ class Navegador(QMainWindow):
         corner_layout.addWidget(self.nueva_pestana_btn())
         self.tabs.setCornerWidget(corner_widget)
         self.setStatusBar(QStatusBar())
+        self._setup_vertical_tabs()
+
+    def _setup_vertical_tabs(self):
+        self.vertical_tabs_dock = QDockWidget("Pestañas", self)
+        self.vertical_tabs_dock.setObjectName("VerticalTabsDock")
+        self.vertical_tabs_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+
+        self.vertical_tabs_list = QListWidget()
+        self.vertical_tabs_list.currentRowChanged.connect(self._switch_to_tab_from_list)
+        self.tabs.currentChanged.connect(self._sync_vertical_tab_selection)
+
+        self.vertical_tabs_dock.setWidget(self.vertical_tabs_list)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.vertical_tabs_dock)
+        self.vertical_tabs_dock.setVisible(self.vertical_tabs_enabled)
+
+    def _update_vertical_tabs_list(self):
+        if not self.vertical_tabs_list: return
+        with QSignalBlocker(self.vertical_tabs_list):
+            self.vertical_tabs_list.clear()
+            for i in range(self.tabs.count()):
+                item = QListWidgetItem()
+                item.setText(self.tabs.tabText(i))
+                item.setIcon(self.tabs.tabIcon(i))
+                self.vertical_tabs_list.addItem(item)
+
+    def _update_vertical_tab_item(self, index: int):
+        """Actualiza un único elemento en la lista de pestañas verticales de forma eficiente."""
+        if not self.vertical_tabs_list or index < 0 or index >= self.vertical_tabs_list.count():
+            return
+        
+        with QSignalBlocker(self.vertical_tabs_list):
+            item = self.vertical_tabs_list.item(index)
+            if item:
+                item.setText(self.tabs.tabText(index))
+                item.setIcon(self.tabs.tabIcon(index))
 
     def _setup_password_manager(self):
         """Initializes the password manager to a locked state (None)."""
@@ -976,6 +1157,7 @@ class Navegador(QMainWindow):
         QShortcut(QKeySequence("Ctrl+-"), self, self._zoom_out)
         QShortcut(QKeySequence("Ctrl+0"), self, self._reset_zoom)
         QShortcut(QKeySequence("Ctrl+Shift+A"), self, self._open_tab_search)
+        QShortcut(QKeySequence("Ctrl+Shift+P"), self, self._open_command_palette)
 
     def _reload_current_tab(self):
         if webview := self._get_current_webview():
@@ -1004,19 +1186,24 @@ class Navegador(QMainWindow):
             tab_id = widget.property("tab_id")
             self.browser_api.onTabActivated.emit(tab_id)
 
-            is_readable = widget.property("is_readable") or False
-            in_reader_mode = widget.property("in_reader_mode") or False
-            if hasattr(self, 'reader_mode_action'):
-                self.reader_mode_action.setEnabled(is_readable or in_reader_mode)
-                self.reader_mode_action.setChecked(in_reader_mode)
-
-
-            if self.settings.value("custom_theme") == "Adaptativo":
+            if self.settings.value("custom_theme") == "Adaptativo" and not self.rgb_theme_timer.isActive():
                 dominant_color = widget.property("dominant_color")
                 if dominant_color:
                     self.apply_custom_theme("Custom", dominant_color)
                 else:
                     self.apply_custom_theme("Default")
+            
+            # Marcar la pestaña como activa y despertarla si está hibernada
+            self.tab_last_active_time[widget] = time.time()
+            if widget.property("is_hibernated"):
+                # Si es una página interna, no la despiertes, solo actualiza la UI
+                if content_stack := widget.findChild(QStackedWidget, "content_stack"):
+                    current_page_widget = content_stack.currentWidget()
+                    if isinstance(current_page_widget, HistoryPageWidget):
+                        self._update_tab_ui_for_internal_page(widget, "history")
+                        return
+
+                self._wake_up_tab(widget)
 
     def _perform_url_suggestions(self):
         """Ejecuta la lógica de autocompletado después de una breve pausa."""
@@ -1049,15 +1236,39 @@ class Navegador(QMainWindow):
             export_action.setEnabled(False)
         file_menu.addSeparator()
 
-        battery_saver_action = file_menu.addAction(self.tr("Ahorro de batería"))
-        battery_saver_action.setCheckable(True)
-        battery_saver_action.setChecked(self.battery_saver_enabled)
-        battery_saver_action.toggled.connect(self._toggle_battery_saver)
+        performance_menu = file_menu.addMenu(self.tr("Modo de Rendimiento"))
+        self.perf_group = QActionGroup(self)
+        self.perf_group.setExclusive(True)
 
-        super_saver_action = file_menu.addAction(self.tr("Ahorro de memoria extremo"))
+        normal_action = performance_menu.addAction(self.tr("Normal"))
+        normal_action.setCheckable(True)
+        normal_action.setData("normal")
+        normal_action.triggered.connect(lambda: self._set_performance_mode("normal"))
+        self.perf_group.addAction(normal_action)
+
+        battery_saver_action = performance_menu.addAction(self.tr("Ahorro de batería"))
+        battery_saver_action.setCheckable(True)
+        battery_saver_action.setData("battery")
+        battery_saver_action.triggered.connect(lambda: self._set_performance_mode("battery"))
+        self.perf_group.addAction(battery_saver_action)
+
+        super_saver_action = performance_menu.addAction(self.tr("Eficiencia Máxima (Bajo CPU y Memoria)"))
         super_saver_action.setCheckable(True)
-        super_saver_action.setChecked(self.super_memory_saver_enabled)
-        super_saver_action.toggled.connect(self._toggle_super_memory_saver)
+        super_saver_action.setData("super")
+        super_saver_action.triggered.connect(lambda: self._set_performance_mode("super"))
+        self.perf_group.addAction(super_saver_action)
+
+        # Set current checked state
+        for action in self.perf_group.actions():
+            if action.data() == self.performance_mode:
+                action.setChecked(True)
+                break
+        
+        performance_menu.addSeparator()
+        hibernation_action = performance_menu.addAction(self.tr("Hibernación de Pestañas Inactivas"))
+        hibernation_action.setCheckable(True)
+        hibernation_action.setChecked(self.hibernation_enabled)
+        hibernation_action.toggled.connect(self._toggle_hibernation)
 
         file_menu.addSeparator()
         clear_action = file_menu.addAction(self.tr("Limpiar perfil y salir"))
@@ -1083,11 +1294,22 @@ class Navegador(QMainWindow):
         toggle_notes_action.setCheckable(True)
         toggle_notes_action.setChecked(self.notes_dock.isVisible() if self.notes_dock else False)
         toggle_notes_action.triggered.connect(self._toggle_notes_dock)
+
+        toggle_web_panels_action = view_menu.addAction(self.tr("Panel Web"))
+        toggle_web_panels_action.setCheckable(True)
+        toggle_web_panels_action.setChecked(self.web_panels_dock.isVisible() if self.web_panels_dock else False)
+        toggle_web_panels_action.triggered.connect(self._toggle_web_panels_dock)
+        
+        view_menu.addSeparator()
+        toggle_vertical_tabs_action = view_menu.addAction(self.tr("Pestañas Verticales"))
+        toggle_vertical_tabs_action.setCheckable(True)
+        toggle_vertical_tabs_action.setChecked(self.vertical_tabs_enabled)
+        toggle_vertical_tabs_action.triggered.connect(self._toggle_vertical_tabs)
         
         view_menu.addSeparator()
         self.reader_mode_action = view_menu.addAction(self.tr("Modo Lectura"))
         self.reader_mode_action.setCheckable(True)
-        self.reader_mode_action.setEnabled(False)
+        self.reader_mode_action.setEnabled(True)
         self.reader_mode_action.triggered.connect(self._toggle_reader_mode)
         view_menu.addSeparator()
 
@@ -1102,16 +1324,30 @@ class Navegador(QMainWindow):
         reset_zoom_action.triggered.connect(self._reset_zoom)
 
         tools_menu = menu_bar.addMenu(self.tr("&Herramientas"))
+        command_palette_action = tools_menu.addAction(self.tr("Paleta de Comandos..."))
+        command_palette_action.setShortcut("Ctrl+Shift+P")
+        command_palette_action.triggered.connect(self._open_command_palette)
+        tools_menu.addSeparator()
         toggle_adblock_action = tools_menu.addAction(self.tr("Activar Bloqueador de Anuncios"))
         toggle_adblock_action.setCheckable(True)
         toggle_adblock_action.setChecked(True)
         toggle_adblock_action.toggled.connect(self.ad_blocker.setEnabled)
         tools_menu.addSeparator()
         self.update_adblock_action = tools_menu.addAction(self.tr("Actualizar Lista de Bloqueo"))
+        self.update_adblock_action.setToolTip("Descarga la última lista de dominios de anuncios y rastreadores.")
         self.update_adblock_action.triggered.connect(self._update_blocklist)
+        self.update_malware_action = tools_menu.addAction(self.tr("Actualizar Lista de Sitios Peligrosos"))
+        self.update_malware_action.setToolTip("Descarga la última lista de sitios conocidos de malware y phishing.")
+        self.update_malware_action.triggered.connect(self._update_malware_list)
         tools_menu.addSeparator()
         clear_data_action = tools_menu.addAction(self.tr("Limpiar datos de navegación..."))
         clear_data_action.triggered.connect(self._clear_browsing_data)
+
+        tools_menu.addSeparator()
+        self.advanced_security_action = tools_menu.addAction(self.tr("Endurecimiento de Seguridad (CSP)"))
+        self.advanced_security_action.setCheckable(True)
+        self.advanced_security_action.setChecked(self.settings.value("advancedSecurityEnabled", False, type=bool))
+        self.advanced_security_action.toggled.connect(self._toggle_advanced_security)
 
         site_permissions_action = tools_menu.addAction(self.tr("Permisos de sitios..."))
         site_permissions_action.triggered.connect(self._open_site_permissions_dialog)
@@ -1128,6 +1364,10 @@ class Navegador(QMainWindow):
         tools_menu.addSeparator()
         manage_extensions_action = tools_menu.addAction(self.tr("Gestionar Extensiones..."))
         manage_extensions_action.triggered.connect(self._manage_extensions)
+
+        task_manager_action = tools_menu.addAction(self.tr("Administrador de Tareas"))
+        task_manager_action.triggered.connect(self._open_task_manager)
+
         tools_menu.addSeparator()
         
         manage_passwords_action = tools_menu.addAction(self.tr("Gestionar Contraseñas..."))
@@ -1183,8 +1423,20 @@ class Navegador(QMainWindow):
         nav_bar = QHBoxLayout(nav_bar_widget)
         nav_bar.setContentsMargins(4, 4, 4, 4)
         nav_bar.setSpacing(4)
-        url_bar = QLineEdit()
+
+        # --- MEJORA: Contenedor para la barra de URL con indicador de seguridad ---
+        url_container = QFrame()
+        url_container.setObjectName("UrlContainer")
+        url_container_layout = QHBoxLayout(url_container)
+        url_container_layout.setContentsMargins(0, 0, 0, 0)
+        url_container_layout.setSpacing(0)
+
+        webview = QWebEngineView() # Se necesita el webview para el indicador
+        security_indicator = SecurityIndicatorWidget(webview, self)
+
+        url_bar = UrlBar()
         url_bar.setPlaceholderText("Escribe una URL o busca...")
+        url_bar.setObjectName("UrlBar")
 
         completer_model = QStringListModel(url_bar)
         url_completer = QCompleter(completer_model, url_bar)
@@ -1192,43 +1444,41 @@ class Navegador(QMainWindow):
         url_completer.setFilterMode(Qt.MatchFlag.MatchContains)
         url_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         url_bar.setCompleter(url_completer)
-
         url_bar.textChanged.connect(self.suggestion_timer.start)
 
-        style = self.style()
         atras_btn = QPushButton()
-        atras_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
+        atras_btn.setIcon(self.standard_icons["back"])
         atras_btn.setObjectName("atras_btn")
         atras_btn.setFixedSize(28, 28)
         atras_btn.setEnabled(False)
         adelante_btn = QPushButton()
-        adelante_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
+        adelante_btn.setIcon(self.standard_icons["forward"])
         adelante_btn.setObjectName("adelante_btn")
         adelante_btn.setFixedSize(28, 28)
         adelante_btn.setEnabled(False)
         recargar_btn = QPushButton()
-        recargar_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        recargar_btn.setIcon(self.standard_icons["reload"])
         recargar_btn.setFixedSize(28, 28)
         home_btn = QPushButton()
-        home_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+        home_btn.setIcon(self.standard_icons["home"])
         home_btn.setToolTip("Ir a la página de inicio")
         home_btn.setFixedSize(28, 28)
 
         add_bookmark_btn = QPushButton()
         add_bookmark_btn.setObjectName("add_bookmark_btn")
-        add_bookmark_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        add_bookmark_btn.setIcon(self.standard_icons["save"])
         add_bookmark_btn.setToolTip("Añadir esta página a Favoritos")
         add_bookmark_btn.setFixedSize(28, 28)
         downloads_btn = QPushButton()
-        downloads_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+        downloads_btn.setIcon(self.standard_icons["downloads"])
         downloads_btn.setToolTip("Abrir carpeta de descargas")
         downloads_btn.setFixedSize(28, 28)
         settings_btn = QPushButton()
-        settings_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        settings_btn.setIcon(self.standard_icons["settings"])
         settings_btn.setToolTip("Configuración")
         settings_btn.setFixedSize(28, 28)
         personalize_btn = QPushButton()
-        personalize_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogListView))
+        personalize_btn.setIcon(self.standard_icons["personalize"])
         personalize_btn.setToolTip("Personalizar apariencia")
         personalize_btn.setFixedSize(28, 28)
 
@@ -1236,13 +1486,17 @@ class Navegador(QMainWindow):
         nav_bar.addWidget(adelante_btn)
         nav_bar.addWidget(recargar_btn)
         nav_bar.addWidget(home_btn)
-        nav_bar.addWidget(url_bar, 1)
+
+        url_container_layout.addWidget(security_indicator)
+        url_container_layout.addWidget(url_bar, 1)
+        nav_bar.addWidget(url_container, 1)
+        # --- FIN MEJORA ---
         
         reader_mode_btn = QPushButton("📖")
         reader_mode_btn.setObjectName("reader_mode_btn")
         reader_mode_btn.setToolTip("Entrar en Modo Lectura")
         reader_mode_btn.setFixedSize(28, 28)
-        reader_mode_btn.setVisible(False)
+        reader_mode_btn.setVisible(True)
         reader_mode_btn.clicked.connect(self._toggle_reader_mode)
         nav_bar.addWidget(reader_mode_btn)
 
@@ -1263,31 +1517,34 @@ class Navegador(QMainWindow):
         nav_bar.addWidget(downloads_btn)
         nav_bar.addWidget(settings_btn)
         layout.addWidget(nav_bar_widget)
-
-        content_area = QWidget()
-        content_layout = QGridLayout(content_area)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(0)
+        
+        # --- MEJORA: Usar QStackedWidget para páginas internas como wemphix:history ---
+        content_stack = QStackedWidget()
+        content_stack.setObjectName("content_stack")
+        web_container = QWidget()
+        web_container_layout = QGridLayout(web_container)
+        web_container_layout.setContentsMargins(0, 0, 0, 0)
+        web_container_layout.setSpacing(0)
 
         progress_bar = QProgressBar()
         progress_bar.setFixedHeight(2)
         progress_bar.setTextVisible(False)
         progress_bar.setVisible(False)
 
-        webview = QWebEngineView()
-        find_bar = self._create_find_bar()
+        find_bar = self._create_find_bar(webview)
 
-        content_layout.addWidget(webview, 0, 0)
-        content_layout.addWidget(progress_bar, 0, 0, Qt.AlignmentFlag.AlignTop)
-        content_layout.addWidget(find_bar, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
-
-        layout.addWidget(content_area, 1)
+        web_container_layout.addWidget(webview, 0, 0)
+        web_container_layout.addWidget(progress_bar, 0, 0, Qt.AlignmentFlag.AlignTop)
+        web_container_layout.addWidget(find_bar, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        content_stack.addWidget(web_container)
+        layout.addWidget(content_stack, 1)
 
         url_completer.activated.connect(lambda text, wv=webview, bar=url_bar: self._suggestion_selected(text, wv, bar))
 
         page = CustomWebEnginePage(self.persistent_profile, webview)
         page.featurePermissionRequested.connect(self.handle_permission_request)
         page.customDownloadRequested.connect(self._start_custom_download)
+        page.fullScreenRequested.connect(self._handle_fullscreen_request)
 
         self._setup_page_scripts(page)
 
@@ -1326,11 +1583,16 @@ class Navegador(QMainWindow):
         webview.loadFinished.connect(lambda ok, webview=webview: self._on_page_load_finished(ok, webview))
         webview.loadFinished.connect(self.actualizar_estado_botones_nav)
         webview.urlChanged.connect(self.actualizar_ui_pestana)
+        # Conectar señales para actualizar el indicador de seguridad
+        webview.urlChanged.connect(lambda qurl, indicator=security_indicator: indicator.update_status())
+        webview.loadFinished.connect(lambda ok, indicator=security_indicator: indicator.update_status())
 
         index = self.tabs.addTab(tab, "Nueva Pestaña")
         tab.setProperty("tab_id", str(uuid.uuid4()))
         if focus:
             self.tabs.setCurrentIndex(index)
+        self.tab_last_active_time[tab] = time.time()
+        self._update_vertical_tabs_list()
 
         if not self.is_incognito:
             self.browser_api.tabAdded.emit({"index": index, "title": "Nueva Pestaña", "url": url})
@@ -1351,7 +1613,7 @@ class Navegador(QMainWindow):
         if title:
             button.setToolTip(title)
 
-    def _create_find_bar(self):
+    def _create_find_bar(self, webview: QWebEngineView):
         find_bar = QFrame()
         find_bar.setObjectName("find_bar")
         find_bar.setFrameShape(QFrame.Shape.StyledPanel)
@@ -1397,6 +1659,14 @@ class Navegador(QMainWindow):
 
         close_btn.clicked.connect(lambda: find_bar.setVisible(False))
 
+        # Conectar señales aquí, donde tenemos la referencia al webview
+        find_input.textChanged.connect(lambda text, wv=webview: self._find_text(text, wv))
+        prev_btn.clicked.connect(lambda wv=webview: self._find_previous(wv))
+        next_btn.clicked.connect(lambda wv=webview: self._find_next(wv))
+        find_input.returnPressed.connect(next_btn.click)
+        webview.page().findTextFinished.connect(
+            lambda result, label=find_results_label: self._update_find_results(result, label))
+
         return find_bar
 
     def _on_page_load_finished(self, ok, webview):
@@ -1407,24 +1677,21 @@ class Navegador(QMainWindow):
             return
 
         self._add_to_history(ok, webview)
-        self._check_for_readable_content(webview)
-
-        find_bar = webview.parentWidget().findChild(QWidget, "find_bar")
-        if find_bar:
-            find_input = find_bar.findChild(QLineEdit, "find_input")
-            find_results_label = find_bar.findChild(QLabel, "find_results_label")
-            prev_btn = find_bar.findChild(QPushButton, "find_prev_btn")
-            next_btn = find_bar.findChild(QPushButton, "find_next_btn")
-
-            if all((find_input, find_results_label, prev_btn, next_btn)):
-                find_input.textChanged.connect(lambda text, wv=webview: self._find_text(text, wv))
-                prev_btn.clicked.connect(lambda wv=webview: self._find_previous(wv))
-                next_btn.clicked.connect(lambda wv=webview: self._find_next(wv))
-                find_input.returnPressed.connect(next_btn.click)
-                webview.page().findTextFinished.connect(lambda result, label=find_results_label: self._update_find_results(result, label))
+        
+        # Si la página cargada es una página web normal, asegurarse de que se muestra
+        tab_widget = self._find_widget_for_webview(webview)
+        if tab_widget:
+            content_stack = tab_widget.findChild(QStackedWidget, "content_stack")
+            if content_stack and content_stack.currentWidget() != webview.parentWidget():
+                content_stack.setCurrentWidget(webview.parentWidget())
 
     def navegar(self, webview, url_bar):
         url = url_bar.text()
+        
+        if url.startswith("wemphix:"):
+            self._handle_internal_url(url, webview)
+            return
+
         parsed_url = urlparse(url)
 
         if not parsed_url.scheme and '.' not in parsed_url.path:
@@ -1435,6 +1702,31 @@ class Navegador(QMainWindow):
             if not parsed_url.scheme:
                 url = "https://" + url
             webview.setUrl(QUrl(url))
+
+    def _handle_internal_url(self, url: str, webview: QWebEngineView):
+        tab_widget = self._find_widget_for_webview(webview)
+        if not tab_widget: return
+
+        content_stack = tab_widget.findChild(QStackedWidget, "content_stack")
+        if not content_stack: return
+
+        if url == "wemphix:history":
+            history_page = tab_widget.findChild(HistoryPageWidget)
+            if not history_page:
+                history_page = HistoryPageWidget(self)
+                content_stack.addWidget(history_page)
+            
+            content_stack.setCurrentWidget(history_page)
+            self._update_tab_ui_for_internal_page(tab_widget, "history")
+
+    def _update_tab_ui_for_internal_page(self, tab_widget: QWidget, page_name: str):
+        index = self.tabs.indexOf(tab_widget)
+        if index == -1: return
+
+        if page_name == "history":
+            self.tabs.setTabText(index, "Historial")
+            self.tabs.setTabIcon(index, self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+            self._update_vertical_tabs_list()
 
     def _set_user_agent(self, user_agent):
         self.persistent_profile.setHttpUserAgent(user_agent)
@@ -1475,24 +1767,60 @@ class Navegador(QMainWindow):
             self.main_window.other_windows.remove(self)
 
         for i in range(self.tabs.count()):
-            if widget := self.tabs.widget(i):
-                if webview := widget.findChild(QWebEngineView):
-                    webview.setPage(None)
-        self.tabs.clear()
+            if (widget := self.tabs.widget(i)) and (webview := widget.findChild(QWebEngineView)):
+                webview.setPage(None) # Libera la página
+
+        # Limpieza explícita de pestañas para evitar fugas de memoria
+        while self.tabs.count() > 0:
+            widget = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            if widget:
+                widget.deleteLater()
 
         for page in self.background_pages.values():
             page.deleteLater()
         self.background_pages.clear()
 
+        self.hibernation_timer.stop()
         super().closeEvent(event)
 
     def _open_settings_dialog(self):
         dialog = SettingsDialog(self)
+
+        # Añadir el grupo de seguridad avanzada al diálogo de configuración existente
+        security_group = AdvancedSecuritySettings(self, dialog)
+        
+        # Sincronizar el checkbox con la acción del menú para que se actualice si el menú cambia mientras el diálogo está abierto.
+        # La sincronización inversa (checkbox -> acción) ya está manejada por el slot _toggle_advanced_security.
+        if hasattr(self, 'advanced_security_action'):
+            self.advanced_security_action.toggled.connect(security_group.advanced_security_check.setChecked)
+        
+        dialog.layout.insertWidget(2, security_group) # Insertar después de los ajustes principales
+        
         dialog.exec()
+
+        # Desconectar la señal para evitar que la conexión persista después de que el diálogo (y el checkbox) se destruyan.
+        if hasattr(self, 'advanced_security_action'):
+            try:
+                self.advanced_security_action.toggled.disconnect(security_group.advanced_security_check.setChecked)
+            except TypeError: # La señal puede haber sido desconectada ya.
+                pass
 
     def _open_site_permissions_dialog(self):
         dialog = SitePermissionsDialog(self)
         dialog.exec()
+
+    def _handle_fullscreen_request(self, request: QWebEngineFullScreenRequest):
+        """Maneja las solicitudes de pantalla completa de forma robusta."""
+        if request.toggleOn():
+            self.fullscreen_request = request
+            self.fullscreen_request.accept()
+            self.showFullScreen()
+        else:
+            if self.fullscreen_request:
+                self.fullscreen_request.accept()
+                self.fullscreen_request = None
+            self.showNormal()
 
     def _open_personalization_dialog(self):
         dialog = PersonalizationDialog(self)
@@ -1500,6 +1828,18 @@ class Navegador(QMainWindow):
 
     def _open_tab_search(self):
         dialog = TabSearchDialog(self)
+        dialog.exec()
+
+    def _open_task_manager(self):
+        try:
+            import psutil
+        except ImportError:
+            QMessageBox.critical(self, "Dependencia Faltante",
+                                 "La función de Administrador de Tareas requiere la librería 'psutil'.\n\n"
+                                 "Por favor, instálala ejecutando en tu terminal:\n"
+                                 "pip install psutil")
+            return
+        dialog = TaskManagerDialog(self)
         dialog.exec()
 
     def _manage_passwords(self, show_manager_on_success=True):
@@ -1560,7 +1900,7 @@ class Navegador(QMainWindow):
                 if "bookmarks" in keys_to_import and "bookmarks" in data:
                     existing_urls = {bm['url'] for bm in self.bookmark_manager.bookmarks}
                     for bm in data["bookmarks"]:
-                        if bm.get('url') not in existing_urls:
+                        if bm and bm.get('url') not in existing_urls:
                             self.bookmark_manager.bookmarks.append(bm)
                     self.bookmark_manager.save()
                     self.bookmark_manager.populate_widget()
@@ -1568,7 +1908,7 @@ class Navegador(QMainWindow):
                 if "history" in keys_to_import and "history" in data:
                     existing_urls = {h['url'] for h in self.history}
                     for h in data["history"]:
-                        if h.get('url') not in existing_urls:
+                        if h and h.get('url') not in existing_urls:
                             self.history.append(h)
                     self._save_history()
                     self._update_history_list_widget()
@@ -1588,7 +1928,7 @@ class Navegador(QMainWindow):
                 if "bookmarks" in keys_to_export: export_data["bookmarks"] = self.bookmark_manager.bookmarks if self.bookmark_manager else []
                 if "history" in keys_to_export: export_data["history"] = self.history
                 if "settings" in keys_to_export:
-                    settings_to_save = ["theme", "homepage", "search_engine", "user_block_list", "batterySaverEnabled", "superMemorySaverEnabled", "custom_theme", "custom_theme_color"]
+                    settings_to_save = ["theme", "homepage", "search_engine", "user_block_list", "performanceMode", "custom_theme", "custom_theme_color"]
                     export_data["settings"] = {key: self.settings.value(key) for key in settings_to_save if self.settings.contains(key)}
                 
                 try:
@@ -1597,6 +1937,15 @@ class Navegador(QMainWindow):
                     QMessageBox.information(self, "Exportación Completa", f"Los datos seleccionados se han guardado en:\n{path}")
                 except Exception as e:
                     QMessageBox.critical(self, "Error de Escritura", f"No se pudo guardar el archivo de respaldo:\n{e}")
+
+    def changeEvent(self, event: QEvent):
+        """Sobrescrito para manejar la salida de pantalla completa con la tecla ESC."""
+        if event.type() == QEvent.Type.WindowStateChange:
+            if not self.isFullScreen() and self.fullscreen_request is not None:
+                # El usuario salió de pantalla completa (p. ej. con ESC)
+                self.fullscreen_request.accept()
+                self.fullscreen_request = None
+        return super().changeEvent(event)
 
     def _update_url_suggestions(self, text: str, model: QStringListModel):
         """Actualiza las sugerencias para la barra de URL basándose en el historial y los favoritos."""
@@ -1607,15 +1956,18 @@ class Navegador(QMainWindow):
         suggestions = []
         seen_urls = set()
         
-        for entry in reversed(self.history):
+        # Limita la búsqueda a los últimos 5000 elementos del historial para mejorar el rendimiento.
+        for entry in itertools.islice(reversed(self.history), 5000):
             if len(suggestions) >= 5: break
             url = entry.get('url', '')
             title = entry.get('title', '')
             if url not in seen_urls and (text.lower() in url.lower() or text.lower() in title.lower()):
                 suggestions.append(f" {title} - {url}")
                 seen_urls.add(url)
-
-        for bookmark in (self.bookmark_manager.bookmarks if self.bookmark_manager else []):
+        
+        # Limita la búsqueda a los primeros 1000 favoritos para evitar iterar sobre listas muy grandes.
+        bookmarks_to_search = self.bookmark_manager.bookmarks if self.bookmark_manager else []
+        for bookmark in itertools.islice(bookmarks_to_search, 1000):
             if len(suggestions) >= 10: break
             url = bookmark.get('url', '')
             title = bookmark.get('title', '')
@@ -1724,42 +2076,31 @@ class Navegador(QMainWindow):
             webview.setUrl(QUrl(homepage_url))
 
     def _get_dominant_color_from_image(self, image: QImage) -> QColor:
-        if image.isNull() or image.width() == 0 or image.height() == 0:
+        if image.isNull():
             return QColor()
 
-        if image.width() > 32 or image.height() > 32:
-            image = image.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        # Scale the image to a 1x1 pixel. The result is the average color.
+        # This is extremely fast compared to iterating pixels in Python.
+        avg_image = image.scaled(1, 1, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        avg_color = QColor(avg_image.pixel(0, 0))
 
-        color_counts = {}
-        for x in range(0, image.width(), 2):
-            for y in range(0, image.height(), 2):
-                pixel_color = QColor(image.pixel(x, y))
-                
-                if (pixel_color.alpha() < 128 or 
-                    pixel_color.lightnessF() > 0.9 or 
-                    pixel_color.lightnessF() < 0.1 or
-                    pixel_color.saturationF() < 0.15):
-                    continue
-                
-                r = round(pixel_color.red() / 20) * 20
-                g = round(pixel_color.green() / 20) * 20
-                b = round(pixel_color.blue() / 20) * 20
-                
-                rgb = (r, g, b)
-                color_counts[rgb] = color_counts.get(rgb, 0) + 1
-        
-        if not color_counts:
-            return QColor()
+        # We still want to avoid very light, very dark, or desaturated colors.
+        if (avg_color.alpha() < 200 or 
+            avg_color.lightnessF() > 0.9 or 
+            avg_color.lightnessF() < 0.1 or
+            avg_color.saturationF() < 0.15):
+            return QColor() # Return invalid color
 
-        dominant_rgb = max(color_counts, key=color_counts.get)
-        dominant_color = QColor(*dominant_rgb)
-        
-        if dominant_color.lightnessF() < 0.2:
-            return dominant_color.lighter(150)
-        return dominant_color
+        # If the color is too dark, lighten it up a bit for better visibility.
+        if avg_color.lightnessF() < 0.2:
+            return avg_color.lighter(150)
+        return avg_color
 
-    def _on_dominant_color_ready(self, dominant_color: QColor, tab_widget: QWidget, tab_index: int):
+    def _on_dominant_color_ready(self, dominant_color: QColor, tab_widget: QWidget, tab_index: int, key_to_cache=None):
         """Aplica el color dominante una vez que ha sido calculado en segundo plano."""
+        if key_to_cache is not None:
+            self.dominant_color_cache[key_to_cache] = dominant_color
+
         if tab_index >= self.tabs.count() or self.tabs.widget(tab_index) != tab_widget:
             return
 
@@ -1810,10 +2151,21 @@ class Navegador(QMainWindow):
             self._create_history_dock()
         self.history_dock.setVisible(checked)
 
+    def _toggle_vertical_tabs(self, checked: bool):
+        self.vertical_tabs_enabled = checked
+        self.settings.setValue("verticalTabsEnabled", checked)
+        if self.vertical_tabs_dock:
+            self.vertical_tabs_dock.setVisible(checked)
+        self.tabs.tabBar().setVisible(not checked)
+
     def _toggle_notes_dock(self, checked):
         if self.notes_dock is None:
             self._create_notes_dock()
         self.notes_dock.setVisible(checked)
+
+    def _toggle_web_panels_dock(self, checked):
+        if self.web_panels_dock is None: self._create_web_panels_dock()
+        self.web_panels_dock.setVisible(checked)
 
     def _create_notes_dock(self):
         self.notes_dock = QDockWidget("Notas", self)
@@ -1821,14 +2173,17 @@ class Navegador(QMainWindow):
 
         self.notes_editor = QTextEdit()
         self.notes_editor.setPlaceholderText("Escribe tus notas aquí...")
-        
+        if not self.notes_loaded:
+            self._load_notes()
+            self.notes_loaded = True
+
         self.notes_dock.setWidget(self.notes_editor)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.notes_dock)
-        self._load_notes()
 
         if self.bookmarks_dock: self.tabifyDockWidget(self.notes_dock, self.bookmarks_dock)
         if self.downloads_dock: self.tabifyDockWidget(self.notes_dock, self.downloads_dock)
         if self.history_dock: self.tabifyDockWidget(self.notes_dock, self.history_dock)
+        if self.web_panels_dock: self.tabifyDockWidget(self.notes_dock, self.web_panels_dock)
 
     def _create_bookmarks_dock(self):
         self.bookmarks_dock = QDockWidget("Favoritos", self)
@@ -1866,6 +2221,7 @@ class Navegador(QMainWindow):
         if self.downloads_dock: self.tabifyDockWidget(self.bookmarks_dock, self.downloads_dock)
         if self.history_dock: self.tabifyDockWidget(self.bookmarks_dock, self.history_dock)
         if self.notes_dock: self.tabifyDockWidget(self.bookmarks_dock, self.notes_dock)
+        if self.web_panels_dock: self.tabifyDockWidget(self.bookmarks_dock, self.web_panels_dock)
 
     def _create_downloads_dock(self):
         self.downloads_dock = QDockWidget("Descargas", self)
@@ -1897,6 +2253,7 @@ class Navegador(QMainWindow):
         if self.bookmarks_dock: self.tabifyDockWidget(self.downloads_dock, self.bookmarks_dock)
         if self.history_dock: self.tabifyDockWidget(self.downloads_dock, self.history_dock)
         if self.notes_dock: self.tabifyDockWidget(self.downloads_dock, self.notes_dock)
+        if self.web_panels_dock: self.tabifyDockWidget(self.downloads_dock, self.web_panels_dock)
 
     def _create_history_dock(self):
         self.history_dock = QDockWidget("Historial", self)
@@ -1922,6 +2279,7 @@ class Navegador(QMainWindow):
         if self.bookmarks_dock: self.tabifyDockWidget(self.history_dock, self.bookmarks_dock)
         if self.downloads_dock: self.tabifyDockWidget(self.history_dock, self.downloads_dock)
         if self.notes_dock: self.tabifyDockWidget(self.history_dock, self.notes_dock)
+        if self.web_panels_dock: self.tabifyDockWidget(self.history_dock, self.web_panels_dock)
 
     def _show_url_bar_context_menu(self, point: QPoint, url_bar: QLineEdit, webview: QWebEngineView):
         menu = url_bar.createStandardContextMenu()
@@ -1975,6 +2333,119 @@ class Navegador(QMainWindow):
     def mostrar_acerca_de(self):
         dialog = AboutDialog(self)
         dialog.exec()
+
+    def _open_command_palette(self):
+        dialog = CommandPaletteDialog(self)
+        dialog.exec()
+
+    def _create_web_panels_dock(self):
+        self.web_panels_dock = QDockWidget("Panel Web", self)
+        self.web_panels_dock.setObjectName("WebPanelsDock")
+        
+        self.web_panel_widget = WebPanelWidget(self)
+        self.web_panels_dock.setWidget(self.web_panel_widget)
+        
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.web_panels_dock)
+        self._load_web_panels()
+
+        
+        if self.bookmarks_dock: self.tabifyDockWidget(self.web_panels_dock, self.bookmarks_dock)
+        if self.downloads_dock: self.tabifyDockWidget(self.web_panels_dock, self.downloads_dock)
+        if self.history_dock: self.tabifyDockWidget(self.web_panels_dock, self.history_dock)
+        if self.notes_dock: self.tabifyDockWidget(self.web_panels_dock, self.notes_dock)
+
+    def _load_web_panels(self):
+        if not self.web_panels_dock: return
+        
+        panels = self.settings.value("web_panels", [], type=list)
+        for panel_data in panels:
+            if isinstance(panel_data, dict):
+                self._add_web_panel_to_ui(panel_data['title'], panel_data['url'])
+
+    def _save_web_panels(self):
+        panels = []
+        for i in range(self.web_panel_widget.stacked_widget.count()):
+            webview = self.web_panel_widget.stacked_widget.widget(i)
+            title = self.web_panel_widget.panel_selector.itemText(i)
+            url = webview.url().toString()
+            panels.append({'title': title, 'url': url})
+        self.settings.setValue("web_panels", panels)
+
+    def _add_web_panel_to_ui(self, title, url):
+        webview = QWebEngineView()
+        page = CustomWebEnginePage(self.persistent_profile, webview)
+        self._apply_page_settings(page)
+        webview.setPage(page)
+        webview.setUrl(QUrl(url))
+        
+        self.web_panel_widget.stacked_widget.addWidget(webview)
+        self.web_panel_widget.panel_selector.addItem(title)
+
+    def _add_current_page_to_web_panels(self):
+        if not (webview := self._get_current_webview()): return
+        if self.is_incognito:
+            QMessageBox.information(self, "Modo Incógnito", "No se pueden añadir paneles web en este modo.")
+            return
+
+        if self.web_panels_dock is None: self._create_web_panels_dock()
+        
+        url = webview.url().toString()
+        title = webview.title() or url
+        
+        self._add_web_panel_to_ui(title, url)
+        self._save_web_panels()
+        self.web_panels_dock.setVisible(True)
+
+    def _remove_current_web_panel(self):
+        if not self.web_panels_dock or self.web_panel_widget.panel_selector.count() == 0: return
+        
+        index = self.web_panel_widget.panel_selector.currentIndex()
+        title = self.web_panel_widget.panel_selector.currentText()
+        
+        reply = QMessageBox.question(self, "Eliminar Panel Web", f"¿Seguro que quieres eliminar el panel '{title}'?")
+        if reply == QMessageBox.StandardButton.Yes:
+            widget = self.web_panel_widget.stacked_widget.widget(index)
+            self.web_panel_widget.stacked_widget.removeWidget(widget)
+            widget.deleteLater()
+            self.web_panel_widget.panel_selector.removeItem(index)
+            self._save_web_panels()
+
+    def _build_command_list(self) -> list:
+        commands = []
+        style = self.style()
+
+        
+        for i in range(self.tabs.count()):
+            title = self.tabs.tabText(i)
+            url = self.tabs.widget(i).findChild(QWebEngineView).url().toString()
+            commands.append({'type': 'tab', 'text': f"Pestaña: {title}", 'icon': self.tabs.tabIcon(i), 'data': i, 'keywords': f"pestaña tab {title} {url}"})
+
+        
+        if self.bookmark_manager:
+            for bm in self.bookmark_manager.bookmarks:
+                commands.append({'type': 'bookmark', 'text': f"Favorito: {bm['title']}", 'icon': style.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), 'data': bm['url'], 'keywords': f"favorito bookmark {bm['title']} {bm['url']}"})
+
+        
+        for h in itertools.islice(reversed(self.history), 100):
+            commands.append({'type': 'history', 'text': f"Historial: {h['title']}", 'icon': style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), 'data': h['url'], 'keywords': f"historial history {h['title']} {h['url']}"})
+
+        
+        commands.append({'type': 'command', 'text': "Nueva Pestaña", 'icon': style.standardIcon(QStyle.StandardPixmap.SP_FileIcon), 'data': 'new_tab', 'keywords': 'nueva pestaña new tab'})
+        commands.append({'type': 'command', 'text': "Configuración", 'icon': style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), 'data': 'settings', 'keywords': 'configuracion settings opciones'})
+        commands.append({'type': 'command', 'text': "Limpiar Datos de Navegación", 'icon': style.standardIcon(QStyle.StandardPixmap.SP_TrashIcon), 'data': 'clear_data', 'keywords': 'limpiar borrar datos cache cookies'})
+
+        return commands
+
+    def _execute_command(self, command: dict):
+        cmd_type = command.get('type')
+        cmd_data = command.get('data')
+
+        if cmd_type == 'tab': self.tabs.setCurrentIndex(cmd_data)
+        elif cmd_type in ('bookmark', 'history'): self.agregar_pestana(cmd_data)
+        elif cmd_type == 'command':
+            if cmd_data == 'new_tab': self.agregar_pestana(focus=True)
+            elif cmd_data == 'settings': self._open_settings_dialog()
+            elif cmd_data == 'clear_data': self._clear_browsing_data()
 
     def handle_permission_request(self, origin: QUrl, feature: QWebEnginePage.Feature): # MODIFIED
         """Maneja las solicitudes de permisos, permitiendo recordar la decisión del usuario."""
@@ -2273,8 +2744,15 @@ class Navegador(QMainWindow):
     def _apply_page_settings(self, page: QWebEnginePage):
         """Applies all necessary settings to a new or existing page."""
         settings = page.settings()
-        
-        settings.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+
+        # --- Optimizaciones por defecto para reducir consumo de CPU y recursos ---
+        # Requiere que el usuario haga clic para reproducir medios, evitando autoplay.
+        settings.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, True)
+        # Desactiva animaciones de scroll suave.
+        settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, False)
+        # Desactiva plugins (ej. Flash), que están obsoletos y consumen recursos.
+        settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
+
         settings.setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.DnsPrefetchEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.ScreenCaptureEnabled, True)
@@ -2282,35 +2760,145 @@ class Navegador(QMainWindow):
             settings.setAttribute(QWebEngineSettings.WebAttribute.WebRTCPublicInterfacesOnly, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, False)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
-
         settings.setAttribute(QWebEngineSettings.WebAttribute.AutoLoadImages, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
 
-
-        if self.super_memory_saver_enabled:
+        if self.super_memory_saver_enabled: # Modo Eficiencia Máxima
             settings.setAttribute(QWebEngineSettings.WebAttribute.AutoLoadImages, False)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, False)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, False)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, False)
-        elif self.battery_saver_enabled:
+        elif self.battery_saver_enabled: # Modo Ahorro de Batería
             settings.setAttribute(QWebEngineSettings.WebAttribute.AutoLoadImages, False)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
+
+    def _update_performance_flags(self, mode: str):
+        self.battery_saver_enabled = (mode == "battery")
+        self.super_memory_saver_enabled = (mode == "super")
+
+    def _set_performance_mode(self, mode: str):
+        """Establece el modo de rendimiento y recarga las pestañas."""
+        if mode == self.performance_mode:
+            return
+
+        if mode == "super":
+            reply = QMessageBox.warning(self, "Modo de Eficiencia Máxima",
+                                      "<b>¡Atención!</b> Este modo deshabilitará funciones esenciales como <b>JavaScript e imágenes</b>.<br><br>"
+                                      "La mayoría de los sitios web modernos no funcionarán correctamente. ¿Deseas continuar?",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                      QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.No:
+                # Re-check the previous mode's action
+                for action in self.perf_group.actions():
+                    if action.data() == self.performance_mode:
+                        action.blockSignals(True)
+                        action.setChecked(True)
+                        action.blockSignals(False)
+                        break
+                return
+
+        self.settings.setValue("performanceMode", mode)
+        self.performance_mode = mode
+        self._update_performance_flags(mode)
+
+        for i in range(self.tabs.count()):
+            if webview := self.tabs.widget(i).findChild(QWebEngineView):
+                self._apply_page_settings(webview.page())
+                webview.reload()
+
+        QMessageBox.information(self, "Modo de Rendimiento Cambiado", "El modo de rendimiento ha sido actualizado. Las pestañas se han recargado para aplicar los cambios.")
+
+    def _toggle_hibernation(self, enabled):
+        """Activa o desactiva la hibernación de pestañas."""
+        self.hibernation_enabled = enabled
+        self.settings.setValue("hibernationEnabled", enabled)
+        if enabled:
+            self.hibernation_timer.start()
+            QMessageBox.information(self, "Hibernación Activada", "Las pestañas inactivas se suspenderán automáticamente para ahorrar recursos.")
+        else:
+            self.hibernation_timer.stop()
+            QMessageBox.information(self, "Hibernación Desactivada", "Las pestañas ya no se suspenderán.")
+
+    def _check_tabs_for_hibernation(self):
+        """Comprueba periódicamente si alguna pestaña debe ser hibernada."""
+        if not self.hibernation_enabled or self.tabs.count() <= 1:
+            return
+
+        current_time = time.time()
+        current_index = self.tabs.currentIndex()
+        hibernation_threshold = 5 * 60  # 5 minutos
+
+        for i in range(self.tabs.count()):
+            if i == current_index:
+                continue
+            
+            widget = self.tabs.widget(i)
+            if not widget or widget.property("is_hibernated"):
+                continue
+
+            last_active = self.tab_last_active_time.get(widget, current_time)
+            if current_time - last_active > hibernation_threshold:
+                self._hibernate_tab(i)
+
+    def _hibernate_tab(self, index):
+        """Suspende una pestaña para liberar recursos."""
+        widget = self.tabs.widget(index)
+        if not widget: return
+        webview = widget.findChild(QWebEngineView)
+        if not webview or webview.page().isAudible():
+            return 
+
+        screenshot = webview.grab()
+        original_url = webview.url().toString()
+        original_title = self.tabs.tabText(index)
+
+        widget.setProperty("is_hibernated", True)
+        widget.setProperty("hibernation_url", original_url)
+        widget.setProperty("hibernation_title", original_title)
+
+        
+        content_stack = widget.findChild(QStackedWidget, "content_stack")
+        if not content_stack: return
+
+        hibernation_page = HibernationWidget(screenshot)
+        hibernation_page.reload_button.clicked.connect(lambda: self._wake_up_tab(widget))
+        content_stack.addWidget(hibernation_page)
+        content_stack.setCurrentWidget(hibernation_page)
+        
+        
+        webview.stop()
+        webview.setUrl(QUrl("about:blank"))
+
+        
+        self.tabs.setTabText(index, f"💤 {original_title}")
+        self._update_vertical_tab_item(index)
+
+    def _wake_up_tab(self, widget):
+        """Restaura una pestaña hibernada."""
+        content_stack = widget.findChild(QStackedWidget, "content_stack")
+        web_container = widget.findChild(QWebEngineView).parentWidget()
+
+        if content_stack and web_container:
+            content_stack.setCurrentWidget(web_container)
+            if hibernation_page := widget.findChild(HibernationWidget):
+                content_stack.removeWidget(hibernation_page)
+                hibernation_page.deleteLater()
+
+        webview = widget.findChild(QWebEngineView)
+        webview.setUrl(QUrl(widget.property("hibernation_url")))
+        widget.setProperty("is_hibernated", False)
 
     def _update_blocklist(self):
         """Inicia la actualización de la lista de bloqueo en un hilo separado para no congelar la UI."""
-        worker = Worker(self._download_blocklist_task)
-        worker.signals.result.connect(self._on_blocklist_download_finished)
-        worker.signals.error.connect(self._on_blocklist_download_error)
-        
-        self.update_adblock_action.setEnabled(False)
-        worker.signals.finished.connect(lambda: self.update_adblock_action.setEnabled(True))
+        if not self.is_incognito:
+            worker = Worker(self._download_blocklist_task)
+            worker.signals.result.connect(self._on_blocklist_download_finished)
+            worker.signals.error.connect(self._on_blocklist_download_error)
+            
+            self.update_adblock_action.setEnabled(False)
+            worker.signals.finished.connect(lambda: self.update_adblock_action.setEnabled(True))
 
-        self.threadpool.start(worker)
-        self.statusBar().showMessage("Actualizando lista de bloqueo...", 4000)
+            self.threadpool.start(worker)
+            self.statusBar().showMessage("Actualizando lista de bloqueo...", 4000)
 
     def _download_blocklist_task(self):
         """Tarea que se ejecuta en segundo plano para descargar y guardar la lista de bloqueo."""
@@ -2327,70 +2915,39 @@ class Navegador(QMainWindow):
         self.statusBar().showMessage("Error al actualizar la lista de bloqueo.", 5000)
         QMessageBox.critical(self, "Error de Actualización", f"No se pudo descargar la lista de bloqueo:\n{value}")
 
-    def _toggle_battery_saver(self, enabled):
-        if enabled and self.super_memory_saver_enabled:
-            for action in self.menuBar().findChildren(QAction):
-                if action.text() == "Ahorro de memoria extremo":
-                    action.blockSignals(True)
-                    action.setChecked(False)
-                    action.blockSignals(False)
-            self.super_memory_saver_enabled = False
-
-        self.battery_saver_enabled = enabled
-        self.settings.setValue("batterySaverEnabled", enabled)
-        
-        for i in range(self.tabs.count()):
-            tab = self.tabs.widget(i)
-            if webview := tab.findChild(QWebEngineView):
-                self._apply_page_settings(webview.page())
-                webview.reload()
-        
-        if enabled:
-            QMessageBox.information(self, "Ahorro de Batería Activado", "Se ha deshabilitado la carga de imágenes y plugins. Las pestañas se han recargado.")
-        else:
-            QMessageBox.information(self, "Ahorro de Batería Desactivado", "Se han restaurado las funciones completas. Las pestañas se han recargado.")
-
-    def _toggle_super_memory_saver(self, enabled):
-        if enabled:
-            reply = QMessageBox.warning(self, "Ahorro de Memoria Extremo",
-                                      "<b>¡Atención!</b> Este modo deshabilitará funciones esenciales como <b>JavaScript e imágenes</b>.<br><br>"
-                                      "La mayoría de los sitios web modernos no funcionarán correctamente. ¿Deseas continuar?",
-                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                      QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.No:
-                for action in self.menuBar().findChildren(QAction):
-                    if action.text() == "Ahorro de memoria extremo":
-                        action.blockSignals(True)
-                        action.setChecked(False)
-                        action.blockSignals(False)
-                return
-
-        self.super_memory_saver_enabled = enabled
-        self.settings.setValue("superMemorySaverEnabled", enabled)
-        
-        if enabled and self.battery_saver_enabled:
-            for action in self.menuBar().findChildren(QAction):
-                if action.text() == "Ahorro de batería":
-                    action.blockSignals(True)
-                    action.setChecked(False)
-                    action.blockSignals(False)
-            self.battery_saver_enabled = False
-
-        for i in range(self.tabs.count()):
-            if webview := self.tabs.widget(i).findChild(QWebEngineView):
-                self._apply_page_settings(webview.page())
-                webview.reload()
-        
-        if enabled:
-            QMessageBox.information(self, "Modo Extremo Activado", "Se han deshabilitado JavaScript, imágenes y más. Las pestañas se han recargado.")
-        else:
-            QMessageBox.information(self, "Modo Extremo Desactivado", "Se han restaurado las funciones completas. Las pestañas se han recargado.")
-
     def _on_blocklist_download_finished(self, success):
         if success:
             self.ad_blocker.load_ad_block_list(self.adblock_list_path)
             self.statusBar().showMessage("Lista de bloqueo actualizada con éxito.", 5000)
             QMessageBox.information(self, "Éxito", "La lista de bloqueo de anuncios ha sido actualizada.")
+
+    def _update_malware_list(self):
+        """Inicia la actualización de la lista de malware en un hilo separado."""
+        if not self.is_incognito:
+            worker = Worker(self._download_malware_list_task)
+            worker.signals.result.connect(self._on_malware_list_download_finished)
+            worker.signals.error.connect(self._on_blocklist_download_error) # Reutilizamos el manejador de errores
+            
+            self.update_malware_action.setEnabled(False)
+            worker.signals.finished.connect(lambda: self.update_malware_action.setEnabled(True))
+
+            self.threadpool.start(worker)
+            self.statusBar().showMessage("Actualizando lista de sitios peligrosos...", 4000)
+
+    def _download_malware_list_task(self):
+        """Tarea que descarga la lista de sitios maliciosos."""
+        url = "https://urlhaus.abuse.ch/downloads/hostfile/"
+        with urllib.request.urlopen(url, timeout=20) as response:
+            data = response.read().decode('utf-8')
+            with open(self.malware_block_list_path, "w", encoding="utf-8") as f:
+                f.write(data)
+        return True
+
+    def _on_malware_list_download_finished(self, success):
+        if success:
+            self._setup_malware_blocker() # Recarga la lista en memoria
+            self.statusBar().showMessage("Lista de sitios peligrosos actualizada.", 5000)
+            QMessageBox.information(self, "Éxito", "La lista de sitios peligrosos ha sido actualizada.")
 
     def _add_current_page_to_bookmarks(self):
         if not (current_widget := self.tabs.currentWidget()) or not (webview := current_widget.findChild(QWebEngineView)):
@@ -2415,7 +2972,7 @@ class Navegador(QMainWindow):
         urls_to_delete = {item.data(Qt.ItemDataRole.UserRole) for item in selected_items}
 
         if self.bookmark_manager.delete(urls_to_delete):
-            # If bookmarks were deleted, update the UI of all tabs
+            
             for i in range(self.tabs.count()):
                 if widget := self.tabs.widget(i):
                     if webview := widget.findChild(QWebEngineView):
@@ -2458,7 +3015,7 @@ class Navegador(QMainWindow):
         if url == "about:blank" or (self.history and self.history[-1]['url'] == url):
             return
 
-        self.history.append({'url': url, 'title': title})
+        self.history.append({'url': url, 'title': title, 'timestamp': time.time()})
         self._update_history_list_widget()
 
     def _clear_history(self):
@@ -2474,6 +3031,37 @@ class Navegador(QMainWindow):
             self.history = []
             self.history_list_widget.clear()
             self._save_history()
+            self._broadcast_history_update()
+
+    def _delete_history_entries(self, entries_to_delete: list[dict]):
+        """
+        Elimina entradas específicas del historial.
+        `entries_to_delete` es una lista de diccionarios de historial.
+        """
+        if self.is_incognito or not entries_to_delete:
+            return
+
+        
+        ids_to_delete = {(d.get('url'), d.get('timestamp')) for d in entries_to_delete}
+
+        initial_count = len(self.history)
+        self.history = [
+            entry for entry in self.history
+            if (entry.get('url'), entry.get('timestamp')) not in ids_to_delete
+        ]
+
+        if len(self.history) < initial_count:
+            self._save_history()
+            self._update_history_list_widget() 
+            self._broadcast_history_update()  
+            self.statusBar().showMessage(f"{initial_count - len(self.history)} entrada(s) del historial eliminada(s).", 3000)
+
+    def _broadcast_history_update(self):
+        """Notifica a las páginas de historial abiertas que los datos han cambiado."""
+        for i in range(self.tabs.count()):
+            if tab_widget := self.tabs.widget(i):
+                if history_page := tab_widget.findChild(HistoryPageWidget):
+                    history_page.refresh_data()
 
     def _go_to_history_item(self, item: QListWidgetItem):
         url = item.data(Qt.ItemDataRole.UserRole)
@@ -2578,6 +3166,36 @@ class Navegador(QMainWindow):
         script_bootstrap.setRunsOnSubFrames(False)
         page.scripts().insert(script_bootstrap)
 
+        if self.settings.value("advancedSecurityEnabled", False, type=bool):
+            csp_content = "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; object-src 'none'; base-uri 'self'; require-trusted-types-for 'script';"
+            referrer_policy_content = "strict-origin-when-cross-origin"
+
+            injection_script_code = f"""
+            (function() {{
+                if (document.head) {{
+                    // Inyectar Content-Security-Policy
+                    var csp_meta = document.createElement('meta');
+                    csp_meta.httpEquiv = 'Content-Security-Policy';
+                    csp_meta.content = "{csp_content}";
+                    document.head.appendChild(csp_meta);
+
+                    // Inyectar Referrer-Policy
+                    var referrer_meta = document.createElement('meta');
+                    referrer_meta.name = 'referrer';
+                    referrer_meta.content = "{referrer_policy_content}";
+                    document.head.appendChild(referrer_meta);
+                }}
+            }})();
+            """
+            
+            security_script = QWebEngineScript()
+            security_script.setSourceCode(injection_script_code)
+            security_script.setName("wemphixSecurityHardening")
+            security_script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+            security_script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+            security_script.setRunsOnSubFrames(True)
+            page.scripts().insert(security_script)
+
         page_url = page.url().toString()
         for ext_id, ext_data in self.extensions.items():
             if not ext_data.get("enabled", False):
@@ -2622,16 +3240,15 @@ class Navegador(QMainWindow):
         if not isinstance(sender_webview, QWebEngineView):
             return
 
-        current_tab = sender_webview.parentWidget().parentWidget()
+        current_tab = self._find_widget_for_webview(sender_webview)
         if current_tab:
-            if url_bar := current_tab.findChild(QLineEdit):
+            if url_bar := current_tab.findChild(QLineEdit, "UrlBar"):
                 url_bar.setText(qurl.toString())
-            
             if add_bookmark_btn := current_tab.findChild(QPushButton, "add_bookmark_btn"):
                 if self._is_bookmarked(qurl.toString()):
-                    add_bookmark_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
+                    add_bookmark_btn.setIcon(self.standard_icons["apply"])
                 else:
-                    add_bookmark_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+                    add_bookmark_btn.setIcon(self.standard_icons["save"])
 
     def actualizar_titulo_pestana(self, title: str):
         sender_webview = self.sender()
@@ -2643,6 +3260,10 @@ class Navegador(QMainWindow):
                         tab_info = {"index": i, "title": title, "url": sender_webview.url().toString()}
                         self.browser_api.tabUpdated.emit(tab_info)
                     
+                    # Si la pestaña estaba hibernada, restaurar el título original
+                    if widget.property("is_hibernated"):
+                        title = widget.property("hibernation_title")
+
                     group_info = widget.property("tab_group")
                     if group_info:
                         widget.setProperty("original_title", title)
@@ -2652,29 +3273,45 @@ class Navegador(QMainWindow):
                     else:
                         self.tabs.setTabText(i, title)
                     break
+            self._update_vertical_tab_item(i)
 
     def actualizar_icono_pestana(self, icon: QIcon):
         sender_webview = self.sender()
         if sender_webview:
+            # No actualizar el icono si la pestaña está hibernada
+            widget = self._find_widget_for_webview(sender_webview)
+            if widget and widget.property("is_hibernated"):
+                return
+
             for i in range(self.tabs.count()):
                 if self.tabs.widget(i) and self.tabs.widget(i).findChild(QWebEngineView) == sender_webview:
                     widget = self.tabs.widget(i)
                     self._update_tab_icon(i)
 
-                    if self.settings.value("custom_theme") == "Adaptativo":
+                    if self.settings.value("custom_theme") == "Adaptativo" and not self.rgb_theme_timer.isActive():
                         if not icon.isNull():
-                            pixmap = icon.pixmap(16, 16)
-                            image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
-                            dominant_color = self._get_dominant_color_from_image(image)
-                            
-                            if dominant_color.isValid():
-                                widget.setProperty("dominant_color", dominant_color.name())
-                                if self.tabs.currentIndex() == i:
-                                    self.apply_custom_theme("Custom", dominant_color.name())
+                            icon_cache_key = icon.cacheKey()
+                            if icon_cache_key in self.dominant_color_cache:
+                                # Usar el color cacheado directamente
+                                dominant_color = self.dominant_color_cache[icon_cache_key]
+                                self._on_dominant_color_ready(dominant_color, widget, i)
                             else:
-                                widget.setProperty("dominant_color", None)
-                                if self.tabs.currentIndex() == i:
-                                    self.apply_custom_theme("Default")
+                                # El cálculo del color dominante puede ser costoso. Lo movemos a un hilo secundario
+                                # para evitar congelar la interfaz de usuario, especialmente al cargar muchas pestañas.
+                                image = icon.pixmap(16, 16).toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+                                worker = Worker(self._get_dominant_color_from_image, image)
+                                # Conectamos la señal de resultado a la ranura que aplicará el color.
+                                # Usamos una lambda para capturar el widget y el índice de la pestaña correctos.
+                                worker.signals.result.connect(
+                                    lambda color, w=widget, tab_idx=i, key=icon_cache_key: self._on_dominant_color_ready(color, w, tab_idx, key_to_cache=key)
+                                )
+                                self.threadpool.start(worker)
+                        else:
+                            # Si no hay icono, reseteamos al tema por defecto inmediatamente.
+                            widget.setProperty("dominant_color", None)
+                            if self.tabs.currentIndex() == i:
+                                self.apply_custom_theme("Default")
+                    self._update_vertical_tab_item(i)
                     break
 
     def _update_tab_icon(self, index: int):
@@ -2687,9 +3324,9 @@ class Navegador(QMainWindow):
                 is_audible = hasattr(page, 'isAudible') and page.isAudible()
 
                 if is_muted:
-                    icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolumeMuted)
+                    icon = QIcon(get_asset_path("muted.svg"))
                 elif is_audible:
-                    icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume)
+                    icon = QIcon(get_asset_path("volume.svg"))
                 else:
                     icon = page.icon() or QIcon()
                 self.tabs.setTabIcon(index, icon)
@@ -2703,8 +3340,7 @@ class Navegador(QMainWindow):
         if not isinstance(sender_webview, QWebEngineView):
             return
 
-
-        current_tab = sender_webview.parentWidget().parentWidget()
+        current_tab = self._find_widget_for_webview(sender_webview)
         if current_tab:
             atras_btn = current_tab.findChild(QPushButton, "atras_btn")
             adelante_btn = current_tab.findChild(QPushButton, "adelante_btn")
@@ -2715,6 +3351,13 @@ class Navegador(QMainWindow):
                 adelante_btn.setEnabled(history.canGoForward())
 
     def cerrar_pestana(self, index):
+        widget_to_close = self.tabs.widget(index)
+        if widget_to_close in self.tab_last_active_time:
+            try:
+                del self.tab_last_active_time[widget_to_close]
+            except KeyError:
+                pass
+
         if self.tabs.count() > 1:
             widget_a_cerrar = self.tabs.widget(index)
             self.tabs.removeTab(index)
@@ -2723,8 +3366,17 @@ class Navegador(QMainWindow):
 
             if widget_a_cerrar:
                 widget_a_cerrar.deleteLater()
+            self._update_vertical_tabs_list()
         else:
             self.close()
+
+    def _find_widget_for_webview(self, webview: QWebEngineView) -> QWidget | None:
+        """Encuentra el widget de la pestaña que contiene un webview específico."""
+        for i in range(self.tabs.count()):
+            widget = self.tabs.widget(i)
+            if widget and widget.findChild(QWebEngineView) == webview:
+                return widget
+        return None
 
     def _close_tab_by_id(self, tab_id: str):
         for i in range(self.tabs.count()):
@@ -2765,6 +3417,7 @@ class Navegador(QMainWindow):
                 if hasattr(page, 'setAudioMuted'):
                     page.setAudioMuted(not page.isAudioMuted())
 
+
     def _show_tab_context_menu(self, point: QPoint):
         index = self.tabs.tabBar().tabAt(point)
         if index == -1:
@@ -2773,11 +3426,18 @@ class Navegador(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Recargar", lambda: self._reload_tab(index))
         menu.addAction("Duplicar", lambda: self._duplicate_tab(index))
-        menu.addSeparator()
-        menu.addAction("Cerrar Pestaña", lambda: self.cerrar_pestana(index))
-        menu.addAction("Cerrar Otras Pestañas", lambda: self._close_other_tabs(index))
-        menu.addAction("Cerrar Pestañas a la Derecha", lambda: self._close_tabs_to_right(index))
+
+        close_menu = menu.addMenu("Cerrar")
+        close_menu.addAction("Cerrar Pestaña", lambda: self.cerrar_pestana(index))
+        close_menu.addAction("Cerrar Otras Pestañas", lambda: self._close_other_tabs(index))
+        close_menu.addAction("Cerrar Pestañas a la Derecha", lambda: self._close_tabs_to_right(index))
+
         if widget := self.tabs.widget(index):
+            menu.addSeparator()
+            add_to_web_panel_action = menu.addAction("Añadir página al Panel Web")
+            add_to_web_panel_action.triggered.connect(self._add_current_page_to_web_panels)
+            menu.addSeparator()
+
             page = widget.findChild(QWebEngineView).page()
 
             menu.addSeparator()
@@ -2847,7 +3507,14 @@ class Navegador(QMainWindow):
 
                 widget.setProperty("original_title", original_title)
                 widget.setProperty("tab_group", {"name": name, "color": color})
-                self.actualizar_titulo_pestana(original_title)
+                
+                # Llamar a actualizar_titulo_pestana requiere el webview, que no tenemos aquí.
+                # Actualizamos manualmente el texto de la pestaña y la lista vertical.
+                group_info = {"name": name, "color": color}
+                color_map = {"blue": "🔵", "red": "🔴", "green": "🟢", "yellow": "🟡", "purple": "🟣", "gray": "⚪"}
+                emoji = color_map.get(group_info["color"], "⚫")
+                self.tabs.setTabText(index, f'{emoji} {group_info["name"]} | {original_title}')
+                self._update_vertical_tabs_list()
 
     def _remove_from_group(self, index: int):
         widget = self.tabs.widget(index)
@@ -2856,6 +3523,7 @@ class Navegador(QMainWindow):
             widget.setProperty("tab_group", None)
             widget.setProperty("original_title", None)
             self.tabs.setTabText(index, original_title or "Pestaña")
+            self._update_vertical_tabs_list()
 
     def event(self, event: QEvent) -> bool:
         """Maneja eventos de la aplicación, como la reanudación desde la suspensión."""
@@ -2867,6 +3535,32 @@ class Navegador(QMainWindow):
             self.last_app_state = new_state
         return super().event(event)
 
+    def _toggle_advanced_security(self, enabled):
+        self.settings.setValue("advancedSecurityEnabled", enabled)
+
+        # Sincronizar la acción del menú si no fue la que originó la señal
+        if hasattr(self, 'advanced_security_action') and self.advanced_security_action.isChecked() != enabled:
+            self.advanced_security_action.setChecked(enabled)
+
+        if enabled:
+            QMessageBox.information(self, "Endurecimiento de Seguridad Activado",
+                                    "Se inyectará una Política de Seguridad de Contenido (CSP) estricta en las páginas nuevas.\n"
+                                    "Esta es una función experimental y puede afectar negativamente a muchos sitios.\n\n"
+                                    "Recarga las pestañas existentes para aplicar los cambios.")
+        else:
+            QMessageBox.information(self, "Endurecimiento de Seguridad Desactivado",
+                                    "El endurecimiento de seguridad ha sido desactivado. Recarga las pestañas para quitar las políticas.")
+
+    def _sync_vertical_tab_selection(self, index: int):
+        """Sincroniza la selección del QTabWidget con la lista de pestañas verticales."""
+        if self.vertical_tabs_list and self.vertical_tabs_list.currentRow() != index:
+            self.vertical_tabs_list.setCurrentRow(index)
+
+    def _switch_to_tab_from_list(self, index: int):
+        """Cambia a la pestaña correspondiente cuando se hace clic en la lista vertical."""
+        if index >= 0 and self.tabs.currentIndex() != index:
+            self.tabs.setCurrentIndex(index)
+
     def _handle_resume_from_suspend(self):
         """Recarga la pestaña actual para restaurar el estado de WebEngine después de una suspensión."""
         print("INFO: Ejecutando recarga post-suspensión.")
@@ -2876,14 +3570,14 @@ class Navegador(QMainWindow):
     def _start_rgb_theme(self):
         if not self.rgb_theme_timer.isActive():
             self.rgb_hue = 0
-            self.rgb_theme_timer.start(50)
+            self.rgb_theme_timer.start(500) # Aumentamos el intervalo para ahorrar más CPU
 
     def _stop_rgb_theme(self):
         if self.rgb_theme_timer.isActive():
             self.rgb_theme_timer.stop()
 
     def _update_rgb_theme(self):
-        self.rgb_hue = (self.rgb_hue + 1) % 360
+        self.rgb_hue = (self.rgb_hue + 6) % 360 # Aumentamos el paso para mantener la velocidad visual
         color = QColor.fromHsv(self.rgb_hue, 200, 220)
         self._apply_theme_stylesheet("Custom", color.name())
 
@@ -2965,10 +3659,10 @@ class Navegador(QMainWindow):
             inactive_tab_hover_bg = "#f0f0f0"
 
         stylesheet = f"""
-            #NavBarWidget {{
+            #NavBarWidget, QTabBar::tab:selected {{
                 background-color: {base_hex};
             }}
-            #SecurityIndicatorWidget {{
+            #UrlContainer {{
                 background-color: {security_bg};
                 border-radius: 10px;
             }}
@@ -2976,25 +3670,30 @@ class Navegador(QMainWindow):
                 background-color: {security_hover_bg};
             }}
             #SecurityIndicatorWidget QLabel {{
-                /* Asegura que las etiquetas de texto e icono dentro no tengan su propio fondo */
                 background-color: transparent;
                 border: none;
+                color: {text_color};
+                padding: 0 4px;
             }}
             #NavBarWidget QPushButton {{
                 background: transparent;
                 border: none;
                 color: {text_color};
+                border-radius: 3px;
             }}
             #NavBarWidget QPushButton:hover {{
                 background-color: {highlight_color};
             }}
-            #NavBarWidget QLineEdit {{
+            #UrlContainer {{
                 border: 1px solid {darker_color};
-                background-color: white; color: black; border-radius: 3px; padding: 2px 4px;
+                background-color: {highlight_color}; border-radius: 3px;
+            }}
+            #UrlBar {{
+                border: none; background: transparent; color: {text_color}; padding: 2px 4px;
             }}
             QTabBar::tab:selected {{
-                background: {base_hex}; color: {text_color}; border: 1px solid {darker_color};
-                border-bottom: 1px solid {base_hex}; border-top-left-radius: 4px; border-top-right-radius: 4px; padding: 4px 8px;
+                color: {text_color}; border: 1px solid {darker_color}; border-bottom: 1px solid {base_hex};
+                border-top-left-radius: 4px; border-top-right-radius: 4px; padding: 4px 8px;
             }}
             QTabBar::tab:!selected {{
                 background: {inactive_tab_bg}; color: {inactive_tab_text}; border: 1px solid {inactive_tab_border};
@@ -3005,70 +3704,11 @@ class Navegador(QMainWindow):
         """
         self.setStyleSheet(stylesheet)
 
-    def _check_for_readable_content(self, webview: QWebEngineView):
-        """Comprueba si la página actual parece un artículo y muestra el botón de modo lectura si es así."""
-        if not webview: return
-        # Si ya estamos en modo lectura, no hagas nada.
-        tab_widget = webview.parentWidget().parentWidget()
-        if tab_widget and tab_widget.property("in_reader_mode"):
-            return
-
-        webview.page().toHtml(lambda html, wv=webview: self._process_html_for_readability(html, wv))
-
-    def _process_html_for_readability(self, html: str, webview: QWebEngineView):
-        """Lanza un worker para analizar el HTML en segundo plano y determinar si es legible."""
-        # Si la pestaña o el webview ya no existen, no hacer nada.
-        if not webview or not webview.parentWidget():
-            return
-
-        worker = Worker(self._is_html_readable_task, html)
-        # Conectamos la señal de resultado a un método que actualizará la UI, pasando el webview como referencia.
-        worker.signals.result.connect(lambda is_readable, wv=webview: self._on_readability_checked(is_readable, wv))
-        worker.signals.error.connect(lambda err: print(f"ERROR: Worker de Readability falló: {err[1]}"))
-        self.threadpool.start(worker)
-
-    def _is_html_readable_task(self, html: str) -> bool:
-        """
-        Tarea que se ejecuta en un hilo separado para analizar el HTML con la librería readability.
-        Esto evita congelar la interfaz de usuario.
-        """
-        if not html:
-            return False
-        try:
-            doc = readability.Document(html)
-            return len(doc.summary()) > 500
-        except Exception as e:
-            print(f"ERROR: Excepción en la librería readability: {e}")
-            return False
-
-    def _on_readability_checked(self, is_readable: bool, webview: QWebEngineView):
-        """
-        Callback que se ejecuta en el hilo principal cuando el worker de legibilidad termina.
-        Actualiza de forma segura el botón de modo lectura.
-        """
-        if not webview or not webview.parentWidget() or not webview.parentWidget().parentWidget():
-            return
-
-        tab_widget = webview.parentWidget().parentWidget()
-        if self.tabs.indexOf(tab_widget) == -1:
-            return 
-
-        tab_widget.setProperty("is_readable", is_readable)
-        if reader_btn := tab_widget.findChild(QPushButton, "reader_mode_btn"):
-            
-            in_reader_mode = tab_widget.property("in_reader_mode") or False
-            reader_btn.setVisible(is_readable and not in_reader_mode)
-        
-        if tab_widget := webview.parentWidget().parentWidget():
-            if self.tabs.currentWidget() == tab_widget:
-                in_reader_mode = tab_widget.property("in_reader_mode") or False
-                self.reader_mode_action.setEnabled(is_readable or in_reader_mode)
-
     def _toggle_reader_mode(self, checked=None):
         """Activa o desactiva el modo de lectura para la pestaña actual."""
         if not (webview := self._get_current_webview()):
             return
-        
+
         tab_widget = webview.parentWidget().parentWidget()
         if not tab_widget:
             return
@@ -3076,29 +3716,34 @@ class Navegador(QMainWindow):
         in_reader_mode = tab_widget.property("in_reader_mode") or False
 
         if in_reader_mode:
-            
+            # Salir del modo lectura
             if original_url := tab_widget.property("original_url"):
                 webview.setUrl(QUrl(original_url))
             tab_widget.setProperty("in_reader_mode", False)
-            
+
             if reader_btn := tab_widget.findChild(QPushButton, "reader_mode_btn"):
                 reader_btn.setText("📖")
                 reader_btn.setToolTip("Entrar en Modo Lectura")
-                is_readable = tab_widget.property("is_readable") or False
-                reader_btn.setVisible(is_readable)
-            
+
             self.reader_mode_action.setChecked(False)
         else:
             # Entrar en modo lectura
-            original_url = webview.url()
-            tab_widget.setProperty("original_url", original_url.toString())
-            webview.page().toHtml(lambda html, wv=webview, url=original_url: self._activate_reader_mode(html, wv, url))
+            webview.page().toHtml(lambda html, wv=webview: self._activate_reader_mode(html, wv))
 
-    def _activate_reader_mode(self, html: str, webview: QWebEngineView, base_url: QUrl):
+    def _activate_reader_mode(self, html: str, webview: QWebEngineView):
         """Genera y muestra la vista de lectura."""
-        doc = readability.Document(html)
-        title = doc.title()
-        content = doc.summary()
+        base_url = webview.url()
+        try:
+            doc = readability.Document(html)
+            content = doc.summary()
+            if len(content) < 400: # Heurística para evitar activar en páginas no-artículos
+                QMessageBox.information(self, "Modo Lectura", "Esta página no parece ser un artículo o no es compatible con el modo lectura.")
+                return
+            title = doc.title()
+        except Exception as e:
+            print(f"Error al procesar para modo lectura: {e}")
+            QMessageBox.warning(self, "Modo Lectura", "Ocurrió un error al intentar procesar esta página.")
+            return
 
         palette = QApplication.instance().palette()
         is_dark_theme = palette.color(QPalette.ColorRole.Window).lightness() < 128
@@ -3118,16 +3763,16 @@ class Navegador(QMainWindow):
             pre {{ padding: 1em; overflow-x: auto; }}
         </style></head><body><h1>{title}</h1>{content}</body></html>
         """
-        
+
         if tab_widget := webview.parentWidget().parentWidget():
+            tab_widget.setProperty("original_url", base_url.toString())
             webview.page().setHtml(reader_html, base_url)
             tab_widget.setProperty("in_reader_mode", True)
-            
+
             if reader_btn := tab_widget.findChild(QPushButton, "reader_mode_btn"):
                 reader_btn.setText("❌")
                 reader_btn.setToolTip("Salir del Modo Lectura")
-                reader_btn.setVisible(True)
-            
+
             self.reader_mode_action.setChecked(True)
 
     def _capture_visible_area(self):
@@ -3222,6 +3867,109 @@ class Navegador(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Guardar Captura", os.path.join(os.path.expanduser("~"), "Downloads", "captura.png"), "Imágenes (*.png *.jpg)")
         if path and not pixmap.save(path):
             QMessageBox.critical(self, "Error al Guardar", f"No se pudo guardar la imagen en:\n{path}")
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        """Acepta eventos de arrastrar si contienen archivos."""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event: QDropEvent):
+        """Maneja los archivos soltados en la ventana del navegador."""
+        if not event.mimeData().hasUrls():
+            super().dropEvent(event)
+            return
+
+        urls = event.mimeData().urls()
+        
+        target_webview = None
+        
+        # Intenta encontrar la pestaña sobre la que se soltó el archivo
+        tab_bar = self.tabs.tabBar()
+        pos_in_tab_bar = tab_bar.mapFrom(self, event.position().toPoint())
+
+        if tab_bar.rect().contains(pos_in_tab_bar):
+            tab_index = tab_bar.tabAt(pos_in_tab_bar)
+            if tab_index != -1:
+                if widget := self.tabs.widget(tab_index):
+                    target_webview = widget.findChild(QWebEngineView)
+        
+        # Si no se soltó sobre una pestaña específica, usa la actual
+        if not target_webview:
+            target_webview = self._get_current_webview()
+
+        if not target_webview:
+            super().dropEvent(event)
+            return
+            
+        event.acceptProposedAction()
+        
+        first_file_navigated = False
+        for url in urls:
+            if url.isLocalFile():
+                if not first_file_navigated:
+                    # El primer archivo navega en la pestaña objetivo
+                    target_webview.setUrl(url)
+                    first_file_navigated = True
+                else:
+                    # Los archivos siguientes se abren en nuevas pestañas
+                    self.agregar_pestana(url.toString(), focus=False)
+class TaskManagerDialog(QDialog):
+    def __init__(self, parent: "Navegador"):
+        super().__init__(parent)
+        self.main_window = parent
+        self.setWindowTitle("Administrador de Tareas de Wemphix")
+        self.setMinimumSize(500, 400)
+
+        self.layout = QVBoxLayout(self)
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Tarea", "Uso de CPU", "Memoria", "Tiempo de CPU"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.layout.addWidget(self.table)
+
+        self.process = psutil.Process(os.getpid())
+        self.process.cpu_percent(interval=None)
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(2000) # Update every 2 seconds
+        self.timer.timeout.connect(self.update_stats)
+        self.timer.start()
+
+        self.update_stats()
+
+    def update_stats(self):
+        self.table.setRowCount(0)
+        try:
+            with self.process.oneshot():
+                cpu_percent = self.process.cpu_percent()
+                mem_info = self.process.memory_info()
+                memory_usage = mem_info.rss / (1024 * 1024)
+                cpu_times = self.process.cpu_times()
+                cpu_time_str = str(timedelta(seconds=int(cpu_times.user + cpu_times.system)))
+            self.add_row("Proceso Principal del Navegador", f"{cpu_percent:.1f}%", f"{memory_usage:.1f} MB", cpu_time_str)
+
+            children = self.process.children(recursive=True)
+            total_child_cpu = sum(c.cpu_percent() for c in children if c.is_running())
+            total_child_mem = sum(c.memory_info().rss for c in children if c.is_running())
+            self.add_row("Subprocesos (Pestañas, GPU, etc.)", f"{total_child_cpu:.1f}%", f"{total_child_mem / (1024*1024):.1f} MB", "-")
+
+            total_row = self.add_row("Total", f"{cpu_percent + total_child_cpu:.1f}%", f"{memory_usage + (total_child_mem / (1024*1024)):.1f} MB", "-")
+            font = total_row[0].font(); font.setBold(True)
+            for item in total_row: item.setFont(font)
+
+        except psutil.NoSuchProcess:
+            self.timer.stop()
+
+    def add_row(self, task, cpu, mem, cpu_time):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        items = [QTableWidgetItem(task), QTableWidgetItem(cpu), QTableWidgetItem(mem), QTableWidgetItem(cpu_time)]
+        for i, item in enumerate(items): self.table.setItem(row, i, item)
+        return items
 
 class ExtensionsDialog(QDialog):
     def __init__(self, parent: Navegador):
@@ -3480,6 +4228,399 @@ class TabGroupDialog(QDialog):
     def get_group_info(self):
         return self.name_input.text() or "Grupo", self.selected_color
 
+class HistoryTableModel(QAbstractTableModel):
+    def __init__(self, data, parent=None):
+        super().__init__(parent)
+        self._data = data
+        self._headers = ["Fecha y Hora", "Título", "URL"]
+
+    def rowCount(self, parent=None):
+        return len(self._data)
+
+    def columnCount(self, parent=None):
+        return len(self._headers)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        
+        entry = self._data[index.row()]
+        
+        if role == Qt.ItemDataRole.DisplayRole:
+            column = index.column()
+            if column == 0:
+                ts = entry.get('timestamp', 0)
+                try:
+                    from datetime import datetime
+                    return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError):
+                    return "Fecha desconocida"
+            elif column == 1:
+                return entry.get('title', '')
+            elif column == 2:
+                return entry.get('url', '')
+        elif role == Qt.ItemDataRole.UserRole:
+            return entry
+
+        return None
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+            return self._headers[section]
+        return None
+
+    def sort(self, column, order):
+        self.layoutAboutToBeChanged.emit()
+        key = None
+        if column == 0: # Time
+            key = lambda x: x.get('timestamp', 0)
+        elif column == 1: # Title
+            key = lambda x: x.get('title', '').lower()
+        elif column == 2: # URL
+            key = lambda x: x.get('url', '').lower()
+        
+        if key:
+            self._data.sort(key=key, reverse=(order == Qt.SortOrder.DescendingOrder))
+        
+        self.layoutChanged.emit()
+
+    def refresh_data(self, new_data):
+        self.beginResetModel()
+        self._data = new_data
+        self.endResetModel()
+
+class HistoryPageWidget(QWidget):
+    def __init__(self, main_window: "Navegador"):
+        super().__init__()
+        self.main_window = main_window
+        self.setObjectName("HistoryPageWidget")
+
+        layout = QVBoxLayout(self)
+        
+        # Barra superior con búsqueda y botones
+        top_bar_layout = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Buscar en el historial...")
+        delete_button = QPushButton("Eliminar Seleccionado(s)")
+        delete_button.clicked.connect(self._delete_selected_history)
+        top_bar_layout.addWidget(self.search_input)
+        top_bar_layout.addWidget(delete_button)
+        layout.addLayout(top_bar_layout)
+
+        # Tabla de historial
+        self.table_view = QTableView()
+        self.table_view.setSortingEnabled(True)
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_view.verticalHeader().setVisible(False)
+        self.table_view.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table_view.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_view.doubleClicked.connect(self._go_to_history_item)
+        layout.addWidget(self.table_view)
+
+        self.model = HistoryTableModel(list(reversed(self.main_window.history)))
+        self.proxy_model = QSortFilterProxyModel()
+        self.proxy_model.setSourceModel(self.model)
+        self.proxy_model.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.proxy_model.setFilterKeyColumn(-1) # Buscar en todas las columnas
+        self.table_view.setModel(self.proxy_model)
+
+        self.search_input.textChanged.connect(self.proxy_model.setFilterFixedString)
+
+    def refresh_data(self):
+        self.model.refresh_data(list(reversed(self.main_window.history)))
+
+    def _go_to_history_item(self, index: QModelIndex):
+        source_index = self.proxy_model.mapToSource(index)
+        entry = self.model.data(source_index, Qt.ItemDataRole.UserRole)
+        if entry and 'url' in entry:
+            self.main_window.agregar_pestana(entry['url'])
+
+    def _delete_selected_history(self):
+        selection_model = self.table_view.selectionModel()
+        if not selection_model.hasSelection():
+            QMessageBox.information(self, "Sin selección", "Por favor, selecciona las filas que deseas eliminar.")
+            return
+
+        selected_rows = selection_model.selectedRows()
+        
+        reply = QMessageBox.question(self, "Confirmar Eliminación",
+                                     f"¿Estás seguro de que quieres eliminar {len(selected_rows)} entrada(s) del historial?\n"
+                                     "Esta acción no se puede deshacer.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.No:
+            return
+
+        entries_to_delete = []
+        for proxy_index in selected_rows:
+            source_index = self.proxy_model.mapToSource(proxy_index)
+            entry = self.model.data(source_index, Qt.ItemDataRole.UserRole)
+            if entry:
+                entries_to_delete.append(entry)
+        
+        if entries_to_delete:
+            self.main_window._delete_history_entries(entries_to_delete)
+
+class HibernationWidget(QWidget):
+    """
+    Un widget que se muestra en lugar de una pestaña hibernada,
+    con una vista previa visual y un botón para recargar.
+    """
+    def __init__(self, screenshot: QPixmap, parent=None):
+        super().__init__(parent)
+        self.setObjectName("HibernationWidget")
+        
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Fondo con la captura de pantalla desaturada
+        self.background_label = QLabel()
+        desaturated_pixmap = self._desaturate(screenshot)
+        self.background_label.setPixmap(desaturated_pixmap)
+        self.background_label.setScaledContents(True)
+        layout.addWidget(self.background_label, 0, 0)
+
+        # Contenedor para el texto y botón superpuesto
+        overlay_container = QWidget()
+        overlay_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        overlay_layout = QVBoxLayout(overlay_container)
+        overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        overlay_widget = QFrame()
+        overlay_widget.setObjectName("HibernationOverlay")
+        overlay_widget.setStyleSheet("""
+            #HibernationOverlay {
+                background-color: rgba(0, 0, 0, 0.65); 
+                border-radius: 15px;
+            }
+        """)
+        overlay_widget_layout = QVBoxLayout(overlay_widget)
+        overlay_widget_layout.setContentsMargins(40, 30, 40, 30)
+        overlay_widget_layout.setSpacing(15)
+        
+        icon_label = QLabel("💤")
+        font = icon_label.font()
+        font.setPointSize(48)
+        icon_label.setFont(font)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        info_label = QLabel("Pestaña Hibernando")
+        font = info_label.font()
+        font.setPointSize(16)
+        font.setBold(True)
+        info_label.setFont(font)
+        info_label.setStyleSheet("background-color: transparent; color: white;")
+        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        sub_label = QLabel("Se ha suspendido para ahorrar recursos.")
+        sub_label.setStyleSheet("background-color: transparent; color: #dddddd;")
+        sub_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.reload_button = QPushButton("Haz clic para recargar")
+        self.reload_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reload_button.setStyleSheet("""
+            QPushButton { 
+                background-color: #4a90e2; 
+                color: white; 
+                padding: 10px 20px; 
+                border: none; 
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #357abd; }
+        """)
+        
+        overlay_widget_layout.addWidget(icon_label)
+        overlay_widget_layout.addWidget(info_label)
+        overlay_widget_layout.addWidget(sub_label)
+        overlay_widget_layout.addSpacing(20)
+        overlay_widget_layout.addWidget(self.reload_button)
+        
+        overlay_layout.addWidget(overlay_widget)
+        layout.addWidget(overlay_container, 0, 0)
+
+    def _desaturate(self, pixmap: QPixmap) -> QPixmap:
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_Grayscale8).convertToFormat(QImage.Format.Format_ARGB32)
+        painter = QPainter(image)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceAtop)
+        painter.fillRect(image.rect(), QColor(0, 0, 0, 120))
+        painter.end()
+        return QPixmap.fromImage(image)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        self.reload_button.click()
+        super().mousePressEvent(event)
+
+class CommandPaletteDialog(QDialog):
+    def __init__(self, parent: "Navegador"):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.main_window = parent
+        self.setMinimumSize(600, 400)
+        
+        # Posicionar el diálogo en la parte superior central
+        parent_rect = parent.geometry()
+        self.setGeometry(
+            parent_rect.x() + (parent_rect.width() - self.width()) // 2,
+            parent_rect.y() + 50,
+            self.width(), self.height()
+        )
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Escriba un comando o busque...")
+        self.search_input.textChanged.connect(self._filter_list)
+        
+        self.results_list = QListWidget()
+        self.results_list.itemActivated.connect(self._execute_selection)
+        
+        self.layout.addWidget(self.search_input)
+        self.layout.addWidget(self.results_list)
+        
+        self.commands = self.main_window._build_command_list()
+        self._populate_list(self.commands)
+        
+        self.search_input.setFocus()
+
+    def _populate_list(self, commands_to_show):
+        self.results_list.clear()
+        for command in commands_to_show:
+            item = QListWidgetItem()
+            item.setText(command['text'])
+            item.setIcon(command['icon'])
+            item.setData(Qt.ItemDataRole.UserRole, command)
+            self.results_list.addItem(item)
+
+    def _filter_list(self):
+        query = self.search_input.text().lower()
+        if not query:
+            self._populate_list(self.commands)
+            return
+
+        filtered_commands = [
+            cmd for cmd in self.commands 
+            if query in cmd.get('keywords', '').lower()
+        ]
+        self._populate_list(filtered_commands)
+
+    def _execute_selection(self, item: QListWidgetItem):
+        command = item.data(Qt.ItemDataRole.UserRole)
+        self.main_window._execute_command(command)
+        self.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+        elif event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            # Dejar que QListWidget maneje la navegación
+            self.results_list.keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+
+class WebPanelWidget(QWidget):
+    def __init__(self, main_window: "Navegador"):
+        super().__init__()
+        self.main_window = main_window
+        self.setObjectName("WebPanelWidget")
+        
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(2)
+
+        self.toolbar = QWidget()
+        toolbar_layout = QHBoxLayout(self.toolbar)
+        toolbar_layout.setContentsMargins(2, 2, 2, 2)
+        
+        self.panel_selector = QComboBox()
+        self.panel_selector.currentIndexChanged.connect(self._switch_panel)
+        
+        add_btn = QPushButton("+")
+        add_btn.setFixedSize(28, 28)
+        add_btn.setToolTip("Añadir página actual como panel")
+        add_btn.clicked.connect(lambda: self.main_window._add_current_page_to_web_panels())
+        
+        remove_btn = QPushButton("-")
+        remove_btn.setFixedSize(28, 28)
+        remove_btn.setToolTip("Eliminar panel actual")
+        remove_btn.clicked.connect(lambda: self.main_window._remove_current_web_panel())
+        
+        toolbar_layout.addWidget(self.panel_selector, 1)
+        toolbar_layout.addWidget(add_btn)
+        toolbar_layout.addWidget(remove_btn)
+        
+        self.stacked_widget = QStackedWidget()
+        
+        self.layout.addWidget(self.toolbar)
+        self.layout.addWidget(self.stacked_widget)
+
+    def _switch_panel(self, index):
+        self.stacked_widget.setCurrentIndex(index)
+
+class SecurityIndicatorWidget(QWidget):
+    """
+    Un widget que muestra el estado de seguridad de la página actual (p. ej., un candado para HTTPS).
+    """
+    def __init__(self, webview: QWebEngineView, parent_window: "Navegador"):
+        super().__init__(parent_window)
+        self.webview = webview
+        self.parent_window = parent_window
+        self.setObjectName("SecurityIndicatorWidget")
+        self.setToolTip("Ver información del sitio")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(6, 2, 6, 2)
+        self.layout.setSpacing(4)
+
+        self.icon_label = QLabel()
+        self.text_label = QLabel()
+
+        self.layout.addWidget(self.icon_label)
+        self.layout.addWidget(self.text_label)
+
+        self.update_status()
+
+    def update_status(self):
+        url = self.webview.url()
+        scheme = url.scheme()
+
+        if scheme == "https":
+            # Usamos un carácter de candado. Se puede reemplazar por un QIcon si se tienen los assets.
+            self.icon_label.setText("🔒")
+            self.text_label.setText("Seguro")
+            self.setToolTip("La conexión es segura")
+        elif scheme == "http":
+            self.icon_label.setText("⚠️")
+            self.text_label.setText("No seguro")
+            self.setToolTip("Tu conexión a este sitio no es segura.")
+        else: # about:, file:, wemphix:, etc.
+            self.icon_label.setText("")
+            self.text_label.setText("") # No mostrar nada para páginas internas/locales
+            self.setToolTip(f"Viendo página local: {url.toString()}")
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            url = self.webview.url()
+            scheme = url.scheme()
+            host = url.host()
+
+            if scheme == "https":
+                # En un navegador real, aquí se mostraría información del certificado.
+                QMessageBox.information(self, "Información del Sitio",
+                                        f"<b>{host}</b>\n\nLa conexión es segura.\n\n"
+                                        "Tu información (por ejemplo, contraseñas o números de tarjetas de crédito) es privada cuando se envía a este sitio.")
+            elif scheme == "http":
+                QMessageBox.warning(self, "Información del Sitio",
+                                    f"<b>{host}</b>\n\nTu conexión a este sitio no es segura.\n\n"
+                                    "No deberías introducir ninguna información sensible en este sitio (por ejemplo, contraseñas o tarjetas de crédito), porque los atacantes podrían robarla.")
+            else:
+                QMessageBox.information(self, "Información del Sitio",
+                                        f"Estás viendo una página local o interna del navegador.\n\nURL: {url.toString()}")
+        super().mousePressEvent(event)
+
 class PersonalizationDialog(QDialog):
     def __init__(self, parent: "Navegador"):
         super().__init__(parent)
@@ -3672,7 +4813,7 @@ class SitePermissionsDialog(QDialog):
 
         if reply == QMessageBox.StandardButton.No:
             return
-
+ 
         saved_permissions = self.main_window.settings.value("site_permissions", {}, type=dict)
 
         for row in selected_rows:
@@ -3995,6 +5136,14 @@ class ManagePasswordsDialog(QDialog):
             self.table.removeRow(row)
 
 def main():
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+        "--enable-gpu-rasterization"
+        " --enable-oop-rasterization"
+        " --num-raster-threads=4"     
+        " --disable-features=TranslateUI"
+        " --ignore-gpu-blocklist" 
+        " --disable-gpu-vsync" 
+    )
     
     server_name = "WemphixBrowserInstance_v1.3"
 
